@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Enable IAM User Permissions",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::${account_id}:root"
+      },
+      "Action": "kms:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "Allow service to use the key",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "${service_name}.amazonaws.com"
+      },
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:CreateGrant",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "${service_name}.${region}.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
