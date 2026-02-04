@@ -1,6 +1,6 @@
 # Hyperion Fleet Manager
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/yourusername/hyperion-fleet-manager)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/jconover/hyperion-fleet-manager)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terraform](https://img.shields.io/badge/Terraform-1.5+-623CE4?logo=terraform)](https://www.terraform.io/)
 [![AWS](https://img.shields.io/badge/AWS-Cloud-FF9900?logo=amazon-aws)](https://aws.amazon.com/)
@@ -180,7 +180,7 @@ export AWS_DEFAULT_REGION="us-east-1"
 #### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/hyperion-fleet-manager.git
+git clone https://github.com/jconover/hyperion-fleet-manager.git
 cd hyperion-fleet-manager
 ```
 
@@ -393,7 +393,6 @@ hyperion-fleet-manager/
 ├── CHANGELOG.md                     # Version history
 ├── LICENSE                          # MIT License
 ├── README.md                        # This file
-└── CLAUDE.md                        # Claude AI context
 ```
 
 ### Key Directories
@@ -601,7 +600,7 @@ We welcome contributions from the community! Please see our [Contributing Guide]
 
 ## Support & Community
 
-- Report bugs via [GitHub Issues](https://github.com/yourusername/hyperion-fleet-manager/issues)
+- Report bugs via [GitHub Issues](https://github.com/jconover/hyperion-fleet-manager/issues)
 - Submit feature requests through issues
 - Join discussions in GitHub Discussions
 - Review the [Troubleshooting Guide](docs/guides/troubleshooting.md)

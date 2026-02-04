@@ -1,0 +1,61 @@
+# EditorConfig is awesome: https://EditorConfig.org
+
+# top-most EditorConfig file
+root = true
+
+# Unix-style newlines with a newline ending every file
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Default indentation
+indent_style = space
+indent_size = 2
+
+# Python
+[*.py]
+indent_size = 4
+max_line_length = 120
+
+# Go
+[*.go]
+indent_style = tab
+indent_size = 4
+
+# Terraform
+[*.tf]
+indent_size = 2
+
+[*.tfvars]
+indent_size = 2
+
+# YAML
+[*.{yml,yaml}]
+indent_size = 2
+
+# JSON
+[*.json]
+indent_size = 2
+
+# Markdown
+[*.md]
+max_line_length = off
+trim_trailing_whitespace = false
+
+# Shell scripts
+[*.sh]
+indent_size = 2
+
+# Makefiles
+[Makefile]
+indent_style = tab
+
+# Dockerfiles
+[Dockerfile*]
+indent_size = 2
+
+# GitHub Actions workflows
+[.github/workflows/*.yml]
+indent_size = 2
