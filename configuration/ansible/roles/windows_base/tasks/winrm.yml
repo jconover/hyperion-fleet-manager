@@ -1,0 +1,143 @@
+---
+# tasks/winrm.yml - Configure WinRM settings
+
+- name: Ensure WinRM service is running
+  ansible.windows.win_service:
+    name: WinRM
+    state: started
+    start_mode: auto
+
+- name: Configure WinRM memory settings
+  ansible.windows.win_powershell:
+    script: |
+      Set-Item WSMan:\localhost\Shell\MaxMemoryPerShellMB {{ winrm_max_memory_per_shell_mb }}
+      Write-Output "MaxMemoryPerShellMB set to {{ winrm_max_memory_per_shell_mb }}"
+  register: winrm_memory_result
+
+- name: Configure WinRM process settings
+  ansible.windows.win_powershell:
+    script: |
+      Set-Item WSMan:\localhost\Shell\MaxProcessesPerShell {{ winrm_max_processes_per_shell }}
+      Write-Output "MaxProcessesPerShell set to {{ winrm_max_processes_per_shell }}"
+
+- name: Configure WinRM shell settings
+  ansible.windows.win_powershell:
+    script: |
+      Set-Item WSMan:\localhost\Shell\MaxShellsPerUser {{ winrm_max_shells_per_user }}
+      Write-Output "MaxShellsPerUser set to {{ winrm_max_shells_per_user }}"
+
+- name: Configure WinRM idle timeout
+  ansible.windows.win_powershell:
+    script: |
+      Set-Item WSMan:\localhost\Shell\IdleTimeout {{ winrm_idle_timeout_ms }}
+      Write-Output "IdleTimeout set to {{ winrm_idle_timeout_ms }}"
+
+- name: Configure WinRM service authentication
+  ansible.windows.win_powershell:
+    script: |
+      Set-Item WSMan:\localhost\Service\Auth\Basic $true
+      Set-Item WSMan:\localhost\Service\Auth\CredSSP $true
+      Set-Item WSMan:\localhost\Service\Auth\Negotiate $true
+      Set-Item WSMan:\localhost\Service\Auth\Kerberos $true
+      Write-Output "WinRM authentication configured"
+
+- name: Configure WinRM encryption settings
+  ansible.windows.win_powershell:
+    script: |
+      Set-Item WSMan:\localhost\Service\AllowUnencrypted ${{ 'true' if winrm_allow_unencrypted else 'false' }}
+      Write-Output "AllowUnencrypted set to {{ winrm_allow_unencrypted }}"
+
+- name: Create self-signed certificate for WinRM HTTPS
+  ansible.windows.win_powershell:
+    script: |
+      $cert = Get-ChildItem -Path Cert:\LocalMachine\My |
+        Where-Object { $_.Subject -eq "{{ winrm_cert_subject }}" -and $_.NotAfter -gt (Get-Date).AddDays(30) } |
+        Sort-Object NotAfter -Descending |
+        Select-Object -First 1
+
+      if (-not $cert) {
+        $params = @{
+          Subject = "{{ winrm_cert_subject }}"
+          DnsName = @("{{ ansible_hostname }}", "{{ ansible_fqdn | default(ansible_hostname) }}", "localhost")
+          CertStoreLocation = "{{ _winrm_cert_store }}"
+          KeyExportPolicy = "Exportable"
+          KeySpec = "KeyExchange"
+          KeyLength = 2048
+          KeyUsage = "KeyEncipherment"
+          NotAfter = (Get-Date).AddDays({{ winrm_cert_validity_days }})
+          FriendlyName = "{{ _winrm_cert_friendly_name }}"
+        }
+        $cert = New-SelfSignedCertificate @params
+        Write-Output "Created new certificate: $($cert.Thumbprint)"
+      } else {
+        Write-Output "Using existing certificate: $($cert.Thumbprint)"
+      }
+      $cert.Thumbprint
+  register: winrm_cert_result
+  when: winrm_enable_https | bool
+
+- name: Configure WinRM HTTPS listener
+  ansible.windows.win_powershell:
+    script: |
+      $certThumbprint = "{{ winrm_cert_result.output[0] | default('') }}"
+
+      # Remove existing HTTPS listener if present
+      $existingListener = Get-WSManInstance -ResourceURI winrm/config/Listener -Enumerate |
+        Where-Object { $_.Transport -eq 'HTTPS' }
+
+      if ($existingListener) {
+        Remove-WSManInstance -ResourceURI winrm/config/Listener -SelectorSet @{
+          Address = '*'
+          Transport = 'HTTPS'
+        } -ErrorAction SilentlyContinue
+      }
+
+      # Create new HTTPS listener
+      New-WSManInstance -ResourceURI winrm/config/Listener -SelectorSet @{
+        Address = '*'
+        Transport = 'HTTPS'
+      } -ValueSet @{
+        CertificateThumbprint = $certThumbprint
+        Port = {{ winrm_https_port }}
+      }
+
+      Write-Output "WinRM HTTPS listener configured on port {{ winrm_https_port }}"
+  when:
+    - winrm_enable_https | bool
+    - winrm_cert_result.output is defined
+    - winrm_cert_result.output | length > 0
+  notify: Restart WinRM
+
+- name: Disable WinRM HTTP listener if required
+  ansible.windows.win_powershell:
+    script: |
+      $httpListener = Get-WSManInstance -ResourceURI winrm/config/Listener -Enumerate |
+        Where-Object { $_.Transport -eq 'HTTP' }
+
+      if ($httpListener) {
+        Remove-WSManInstance -ResourceURI winrm/config/Listener -SelectorSet @{
+          Address = '*'
+          Transport = 'HTTP'
+        }
+        Write-Output "HTTP listener removed"
+      } else {
+        Write-Output "HTTP listener not present"
+      }
+  when: not (winrm_enable_http | bool)
+  notify: Restart WinRM
+
+- name: Deploy WinRM configuration script
+  ansible.windows.win_template:
+    src: Configure-WinRM.ps1.j2
+    dest: "{{ hyperion_base_directory }}\\Scripts\\Configure-WinRM.ps1"
+
+- name: Display WinRM configuration summary
+  ansible.builtin.debug:
+    msg: |
+      WinRM Configuration Summary:
+      - HTTPS Enabled: {{ winrm_enable_https }}
+      - HTTPS Port: {{ winrm_https_port }}
+      - HTTP Enabled: {{ winrm_enable_http }}
+      - Max Memory Per Shell: {{ winrm_max_memory_per_shell_mb }} MB
+      - Max Shells Per User: {{ winrm_max_shells_per_user }}
+    verbosity: 1

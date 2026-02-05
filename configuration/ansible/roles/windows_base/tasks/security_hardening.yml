@@ -1,0 +1,149 @@
+---
+# tasks/security_hardening.yml - Apply security hardening configurations
+
+- name: Disable SMBv1
+  ansible.windows.win_powershell:
+    script: |
+      # Disable SMBv1 protocol
+      Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force
+
+      # Disable SMBv1 client
+      Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue
+
+      Write-Output "SMBv1 disabled"
+  when: windows_disable_smb1 | bool
+  register: smb1_result
+  ignore_errors: true
+
+- name: Enable SMB signing on server
+  ansible.windows.win_regedit:
+    path: "{{ _reg_smb_server }}"
+    name: "{{ item.name }}"
+    data: "{{ item.data }}"
+    type: dword
+  loop:
+    - name: RequireSecuritySignature
+      data: "{{ 1 if windows_enable_smb_signing else 0 }}"
+    - name: EnableSecuritySignature
+      data: 1
+  when: windows_enable_smb_signing | bool
+
+- name: Enable SMB signing on client
+  ansible.windows.win_regedit:
+    path: "{{ _reg_smb_client }}"
+    name: "{{ item.name }}"
+    data: "{{ item.data }}"
+    type: dword
+  loop:
+    - name: RequireSecuritySignature
+      data: "{{ 1 if windows_enable_smb_signing else 0 }}"
+    - name: EnableSecuritySignature
+      data: 1
+  when: windows_enable_smb_signing | bool
+
+- name: Configure LDAP signing
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\LDAP
+    name: LDAPClientIntegrity
+    data: 2
+    type: dword
+  when: windows_enable_ldap_signing | bool
+
+- name: Disable LLMNR
+  ansible.windows.win_regedit:
+    path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient
+    name: EnableMulticast
+    data: 0
+    type: dword
+
+- name: Disable NetBIOS over TCP/IP
+  ansible.windows.win_powershell:
+    script: |
+      $adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
+      foreach ($adapter in $adapters) {
+        $adapter.SetTcpipNetbios(2)  # 2 = Disable NetBIOS
+      }
+      Write-Output "NetBIOS disabled on all adapters"
+  register: netbios_result
+  ignore_errors: true
+
+- name: Disable Windows Remote Assistance
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance
+    name: fAllowToGetHelp
+    data: 0
+    type: dword
+
+- name: Configure password policy settings
+  ansible.windows.win_powershell:
+    script: |
+      # Export current security policy
+      secedit /export /cfg C:\Windows\Temp\secpol.cfg
+
+      # Read and modify
+      $content = Get-Content C:\Windows\Temp\secpol.cfg
+
+      # Update password policy values
+      $content = $content -replace 'MinimumPasswordLength = \d+', 'MinimumPasswordLength = {{ windows_password_policy.minimum_length }}'
+      $content = $content -replace 'PasswordComplexity = \d+', 'PasswordComplexity = {{ 1 if windows_password_policy.complexity_enabled else 0 }}'
+      $content = $content -replace 'MaximumPasswordAge = \d+', 'MaximumPasswordAge = {{ windows_password_policy.maximum_age_days }}'
+      $content = $content -replace 'MinimumPasswordAge = \d+', 'MinimumPasswordAge = {{ windows_password_policy.minimum_age_days }}'
+      $content = $content -replace 'PasswordHistorySize = \d+', 'PasswordHistorySize = {{ windows_password_policy.history_count }}'
+
+      # Write back
+      $content | Set-Content C:\Windows\Temp\secpol.cfg
+
+      # Apply security policy
+      secedit /configure /db C:\Windows\Temp\secedit.sdb /cfg C:\Windows\Temp\secpol.cfg /areas SECURITYPOLICY
+
+      # Cleanup
+      Remove-Item C:\Windows\Temp\secpol.cfg -Force -ErrorAction SilentlyContinue
+      Remove-Item C:\Windows\Temp\secedit.sdb -Force -ErrorAction SilentlyContinue
+
+      Write-Output "Password policy configured"
+  register: password_policy_result
+  ignore_errors: true
+
+- name: Configure account lockout policy
+  ansible.windows.win_powershell:
+    script: |
+      net accounts /lockoutthreshold:{{ windows_lockout_policy.threshold }}
+      net accounts /lockoutduration:{{ windows_lockout_policy.duration_minutes }}
+      net accounts /lockoutwindow:{{ windows_lockout_policy.reset_minutes }}
+      Write-Output "Account lockout policy configured"
+  register: lockout_policy_result
+
+- name: Disable anonymous SID enumeration
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+    name: RestrictAnonymousSAM
+    data: 1
+    type: dword
+
+- name: Restrict anonymous access to named pipes and shares
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+    name: RestrictAnonymous
+    data: 1
+    type: dword
+
+- name: Enable DEP (Data Execution Prevention)
+  ansible.windows.win_powershell:
+    script: |
+      bcdedit /set nx OptOut
+      Write-Output "DEP configured to OptOut"
+  register: dep_result
+  ignore_errors: true
+
+- name: Display security hardening summary
+  ansible.builtin.debug:
+    msg: |
+      Security Hardening Applied:
+      - SMBv1 Disabled: {{ windows_disable_smb1 }}
+      - SMB Signing: {{ windows_enable_smb_signing }}
+      - LDAP Signing: {{ windows_enable_ldap_signing }}
+      - LLMNR Disabled: Yes
+      - NetBIOS Disabled: Yes
+      - Password Policy: Configured
+      - Account Lockout: {{ windows_lockout_policy.threshold }} attempts
+    verbosity: 1

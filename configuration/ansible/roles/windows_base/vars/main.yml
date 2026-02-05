@@ -1,0 +1,102 @@
+---
+# vars/main.yml - Internal variables for windows_base role
+# These should not be overridden - use defaults/main.yml for customization
+
+# =============================================================================
+# Internal Constants
+# =============================================================================
+
+# Role identification
+_windows_base_role_version: "1.0.0"
+_windows_base_role_name: "windows_base"
+
+# =============================================================================
+# Registry Paths
+# =============================================================================
+_reg_windows_update: "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU"
+_reg_winrm: "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WSMAN"
+_reg_smb_server: "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\LanmanServer\\Parameters"
+_reg_smb_client: "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\LanmanWorkstation\\Parameters"
+_reg_tcpip_params: "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters"
+
+# =============================================================================
+# Windows Update AU Options
+# =============================================================================
+# AUOptions values:
+# 2 = Notify before download
+# 3 = Auto download, notify before install
+# 4 = Auto download and schedule install
+# 5 = Allow local admin to choose setting
+_windows_update_au_options:
+  notify_download: 2
+  auto_download_notify_install: 3
+  auto_download_schedule_install: 4
+  local_admin_choose: 5
+
+# =============================================================================
+# WinRM Configuration Commands
+# =============================================================================
+_winrm_quickconfig_commands:
+  - "winrm quickconfig -quiet"
+  - "winrm set winrm/config/service '@{AllowUnencrypted=\"false\"}'"
+  - "winrm set winrm/config/service/auth '@{Basic=\"true\"}'"
+  - "winrm set winrm/config/service/auth '@{CredSSP=\"true\"}'"
+
+# =============================================================================
+# PowerShell Module Sources
+# =============================================================================
+_powershell_gallery_url: "https://www.powershellgallery.com/api/v2"
+_nuget_provider_minimum_version: "2.8.5.201"
+
+# =============================================================================
+# Scheduled Task Configuration
+# =============================================================================
+_health_report_task_name: "Hyperion-Health-Report"
+_health_report_task_path: "\\Hyperion\\"
+_health_report_script_name: "Invoke-HealthReport.ps1"
+
+# =============================================================================
+# Event Log Overflow Actions
+# =============================================================================
+_event_log_overflow_actions:
+  overwrite_as_needed: "OverwriteAsNeeded"
+  overwrite_older: "OverwriteOlder"
+  do_not_overwrite: "DoNotOverwrite"
+
+# =============================================================================
+# Firewall Protocol Mapping
+# =============================================================================
+_firewall_protocols:
+  tcp: "TCP"
+  udp: "UDP"
+  icmpv4: "ICMPv4"
+  icmpv6: "ICMPv6"
+  any: "Any"
+
+# =============================================================================
+# Certificate Configuration
+# =============================================================================
+_winrm_cert_store: "Cert:\\LocalMachine\\My"
+_winrm_cert_friendly_name: "WinRM HTTPS Certificate"
+_winrm_cert_key_usage: "KeyEncipherment"
+_winrm_cert_enhanced_key_usage: "1.3.6.1.5.5.7.3.1"  # Server Authentication
+
+# =============================================================================
+# Validation Patterns
+# =============================================================================
+_valid_timezone_pattern: "^[A-Za-z ]+$"
+_valid_directory_pattern: "^[A-Z]:\\\\[\\w\\\\]+$"
+
+# =============================================================================
+# Default Timeouts
+# =============================================================================
+_feature_install_timeout_seconds: 1800
+_service_start_timeout_seconds: 120
+_reboot_timeout_seconds: 600
+_connection_timeout_seconds: 300
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+_ansible_log_path: "C:\\Hyperion\\Logs\\ansible"
+_role_execution_log: "windows_base_execution.log"

@@ -1,0 +1,65 @@
+---
+# tasks/windows_update.yml - Configure Windows Update settings
+
+- name: Ensure Windows Update registry path exists
+  ansible.windows.win_regedit:
+    path: "{{ _reg_windows_update }}"
+    state: present
+
+- name: Configure Windows Update auto-download setting
+  ansible.windows.win_regedit:
+    path: "{{ _reg_windows_update }}"
+    name: AUOptions
+    data: "{{ 3 if windows_update_auto_download and not windows_update_auto_install else 4 if windows_update_auto_install else 2 }}"
+    type: dword
+  when: windows_update_enabled | bool
+
+- name: Configure Windows Update scheduled install day
+  ansible.windows.win_regedit:
+    path: "{{ _reg_windows_update }}"
+    name: ScheduledInstallDay
+    data: "{{ windows_update_scheduled_install_day }}"
+    type: dword
+  when: windows_update_enabled | bool
+
+- name: Configure Windows Update scheduled install time
+  ansible.windows.win_regedit:
+    path: "{{ _reg_windows_update }}"
+    name: ScheduledInstallTime
+    data: "{{ windows_update_scheduled_install_time }}"
+    type: dword
+  when: windows_update_enabled | bool
+
+- name: Configure automatic reboot setting
+  ansible.windows.win_regedit:
+    path: "{{ _reg_windows_update }}"
+    name: NoAutoRebootWithLoggedOnUsers
+    data: "{{ 1 if windows_update_no_auto_reboot else 0 }}"
+    type: dword
+  when: windows_update_enabled | bool
+
+- name: Configure recommended updates setting
+  ansible.windows.win_regedit:
+    path: "{{ _reg_windows_update }}"
+    name: IncludeRecommendedUpdates
+    data: "{{ 1 if windows_update_include_recommended else 0 }}"
+    type: dword
+  when: windows_update_enabled | bool
+
+- name: Enable Windows Update service
+  ansible.windows.win_service:
+    name: wuauserv
+    start_mode: "{{ 'auto' if windows_update_enabled else 'disabled' }}"
+    state: "{{ 'started' if windows_update_enabled else 'stopped' }}"
+
+- name: Display Windows Update configuration
+  ansible.builtin.debug:
+    msg: |
+      Windows Update Configuration:
+      - Enabled: {{ windows_update_enabled }}
+      - Auto Download: {{ windows_update_auto_download }}
+      - Auto Install: {{ windows_update_auto_install }}
+      - Scheduled Day: {{ windows_update_scheduled_install_day }}
+      - Scheduled Time: {{ windows_update_scheduled_install_time }}:00
+      - No Auto Reboot: {{ windows_update_no_auto_reboot }}
+    verbosity: 1

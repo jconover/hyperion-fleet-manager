@@ -1,0 +1,122 @@
+---
+# meta/main.yml - Role metadata for windows_base
+
+galaxy_info:
+  role_name: windows_base
+  namespace: hyperion
+  author: Hyperion Fleet Manager Team
+  description: >-
+    Base Windows Server configuration role for Hyperion Fleet Manager.
+    Configures Windows features, firewall, WinRM, timezone, services,
+    event logs, DSC modules, security hardening, and health reporting.
+  company: Hyperion Infrastructure
+
+  license: MIT
+
+  min_ansible_version: "2.14"
+
+  platforms:
+    - name: Windows
+      versions:
+        - "2019"
+        - "2022"
+
+  galaxy_tags:
+    - windows
+    - server
+    - configuration
+    - hardening
+    - winrm
+    - firewall
+    - monitoring
+    - infrastructure
+    - fleet_management
+    - enterprise
+
+  issue_tracker_url: https://github.com/jconover/hyperion-fleet-manager/issues
+  repository: https://github.com/jconover/hyperion-fleet-manager
+  documentation: https://github.com/jconover/hyperion-fleet-manager/tree/main/docs
+
+# Role dependencies
+dependencies: []
+  # This role has no dependencies on other Ansible Galaxy roles.
+  # It is designed to be the foundational role for Windows configuration.
+  #
+  # Example if dependencies were needed:
+  # - role: geerlingguy.docker
+  #   when: docker_enabled | default(false)
+
+# Collection dependencies (for ansible-galaxy collection install)
+collections:
+  - name: ansible.windows
+    version: ">=1.14.0"
+  - name: community.windows
+    version: ">=1.13.0"
+
+# Allow duplicate runs (useful for applying to multiple host groups)
+allow_duplicates: false
+
+# Argument specifications for role validation
+argument_specs:
+  main:
+    short_description: Base Windows configuration for Hyperion Fleet Manager
+    description:
+      - This role configures Windows Server instances with the base configuration
+      - required for Hyperion Fleet Manager. It handles timezone, features, firewall,
+      - WinRM, services, event logs, DSC modules, security hardening, and health reporting.
+    author: Hyperion Fleet Manager Team
+    options:
+      windows_timezone:
+        type: str
+        default: "UTC"
+        description: Timezone to configure on Windows servers
+
+      windows_features:
+        type: list
+        elements: dict
+        default: []
+        description: List of Windows features to install
+
+      windows_firewall_enabled:
+        type: bool
+        default: true
+        description: Whether to enable Windows Firewall
+
+      windows_firewall_rules:
+        type: list
+        elements: dict
+        default: []
+        description: List of firewall rules to configure
+
+      winrm_enable_https:
+        type: bool
+        default: true
+        description: Enable WinRM HTTPS listener
+
+      winrm_enable_http:
+        type: bool
+        default: false
+        description: Enable WinRM HTTP listener
+
+      windows_dsc_modules:
+        type: list
+        elements: dict
+        default: []
+        description: List of DSC modules to install from PowerShell Gallery
+
+      windows_health_reporting_enabled:
+        type: bool
+        default: true
+        description: Enable scheduled health reporting task
+
+      windows_ntp_enabled:
+        type: bool
+        default: true
+        description: Enable NTP time synchronization
+
+      windows_ntp_servers:
+        type: list
+        elements: str
+        default:
+          - "169.254.169.123"
+        description: List of NTP servers to configure

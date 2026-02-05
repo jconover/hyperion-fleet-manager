@@ -1,0 +1,120 @@
+---
+# tasks/main.yml - Main tasks for windows_base role
+# Configures Windows servers with Hyperion Fleet Manager base settings
+
+- name: Display role information
+  ansible.builtin.debug:
+    msg: "Executing windows_base role v{{ _windows_base_role_version }} on {{ inventory_hostname }}"
+  tags:
+    - always
+
+# =============================================================================
+# Pre-flight Checks
+# =============================================================================
+- name: Gather Windows facts
+  ansible.windows.setup:
+  tags:
+    - always
+
+- name: Verify Windows Server edition
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == "Windows"
+    fail_msg: "This role only supports Windows operating systems"
+    success_msg: "Windows operating system detected: {{ ansible_distribution }}"
+  tags:
+    - always
+
+# =============================================================================
+# Include Task Files
+# =============================================================================
+- name: Configure timezone
+  ansible.builtin.include_tasks: timezone.yml
+  tags:
+    - timezone
+    - configuration
+
+- name: Install Windows features
+  ansible.builtin.include_tasks: features.yml
+  tags:
+    - features
+    - packages
+
+- name: Configure PowerShell
+  ansible.builtin.include_tasks: powershell.yml
+  tags:
+    - powershell
+    - configuration
+
+- name: Configure WinRM
+  ansible.builtin.include_tasks: winrm.yml
+  tags:
+    - winrm
+    - configuration
+    - security
+
+- name: Configure Windows Firewall
+  ansible.builtin.include_tasks: firewall.yml
+  tags:
+    - firewall
+    - security
+
+- name: Configure Windows Update
+  ansible.builtin.include_tasks: windows_update.yml
+  tags:
+    - windows_update
+    - updates
+
+- name: Create standard directories
+  ansible.builtin.include_tasks: directories.yml
+  tags:
+    - directories
+    - filesystem
+
+- name: Configure event logs
+  ansible.builtin.include_tasks: event_logs.yml
+  tags:
+    - event_logs
+    - logging
+
+- name: Configure services
+  ansible.builtin.include_tasks: services.yml
+  tags:
+    - services
+    - configuration
+
+- name: Install DSC modules
+  ansible.builtin.include_tasks: dsc_modules.yml
+  tags:
+    - dsc
+    - powershell
+
+- name: Configure NTP
+  ansible.builtin.include_tasks: ntp.yml
+  when: windows_ntp_enabled | bool
+  tags:
+    - ntp
+    - time
+
+- name: Configure security hardening
+  ansible.builtin.include_tasks: security_hardening.yml
+  tags:
+    - security
+    - hardening
+
+- name: Configure health reporting
+  ansible.builtin.include_tasks: health_reporting.yml
+  when: windows_health_reporting_enabled | bool
+  tags:
+    - health
+    - monitoring
+    - scheduled_tasks
+
+# =============================================================================
+# Post-configuration Validation
+# =============================================================================
+- name: Validate configuration
+  ansible.builtin.include_tasks: validate.yml
+  tags:
+    - validation
+    - always

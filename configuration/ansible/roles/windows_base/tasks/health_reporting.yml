@@ -1,0 +1,68 @@
+---
+# tasks/health_reporting.yml - Configure health reporting scheduled task
+
+- name: Deploy health report PowerShell script
+  ansible.windows.win_template:
+    src: Invoke-HealthReport.ps1.j2
+    dest: "{{ hyperion_base_directory }}\\Scripts\\{{ _health_report_script_name }}"
+
+- name: Create Hyperion scheduled task folder
+  ansible.windows.win_powershell:
+    script: |
+      $taskFolder = "{{ _health_report_task_path }}"
+      $scheduler = New-Object -ComObject Schedule.Service
+      $scheduler.Connect()
+      $rootFolder = $scheduler.GetFolder('\')
+
+      try {
+        $folder = $rootFolder.GetFolder($taskFolder.TrimEnd('\'))
+        Write-Output "Task folder already exists"
+      } catch {
+        $rootFolder.CreateFolder($taskFolder.TrimEnd('\'))
+        Write-Output "Created task folder: $taskFolder"
+      }
+  register: task_folder_result
+
+- name: Create health reporting scheduled task
+  community.windows.win_scheduled_task:
+    name: "{{ _health_report_task_name }}"
+    path: "{{ _health_report_task_path }}"
+    description: "Hyperion Fleet Manager health reporting task"
+    actions:
+      - path: powershell.exe
+        arguments: >-
+          -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File "{{ hyperion_base_directory }}\Scripts\{{ _health_report_script_name }}"
+    triggers:
+      - type: time
+        start_boundary: "2024-01-01T00:00:00"
+        repetition:
+          interval: "PT{{ windows_health_report_interval_minutes }}M"
+          duration: "P1D"
+        enabled: true
+    username: SYSTEM
+    state: present
+    enabled: true
+    run_level: highest
+    multiple_instances: 2  # Queue
+    restart_count: 3
+    restart_interval: "PT1M"
+    execution_time_limit: "PT5M"
+  register: health_task_result
+
+- name: Run initial health report
+  ansible.windows.win_powershell:
+    script: |
+      & "{{ hyperion_base_directory }}\Scripts\{{ _health_report_script_name }}"
+  register: initial_health_report
+  ignore_errors: true
+
+- name: Display health reporting configuration
+  ansible.builtin.debug:
+    msg: |
+      Health Reporting Configuration:
+      - Task Name: {{ _health_report_task_name }}
+      - Task Path: {{ _health_report_task_path }}
+      - Interval: {{ windows_health_report_interval_minutes }} minutes
+      - Output Path: {{ windows_health_report_output_path }}
+    verbosity: 1

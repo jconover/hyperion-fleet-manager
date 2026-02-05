@@ -1,0 +1,68 @@
+---
+# tasks/services.yml - Configure Windows services
+
+- name: Enable and start required services
+  ansible.windows.win_service:
+    name: "{{ item.name }}"
+    start_mode: "{{ item.start_mode }}"
+    state: started
+  loop: "{{ windows_services_to_enable }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: enable_services_result
+  ignore_errors: true
+
+- name: Disable unnecessary services
+  ansible.windows.win_service:
+    name: "{{ item.name }}"
+    start_mode: "{{ item.start_mode }}"
+    state: stopped
+  loop: "{{ windows_services_to_disable }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: disable_services_result
+  ignore_errors: true
+
+- name: Configure SNMP service settings
+  ansible.windows.win_powershell:
+    script: |
+      $snmpService = Get-Service -Name SNMP -ErrorAction SilentlyContinue
+      if ($snmpService) {
+        # Configure SNMP community strings via registry
+        $snmpPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\ValidCommunities"
+
+        if (-not (Test-Path $snmpPath)) {
+          New-Item -Path $snmpPath -Force | Out-Null
+        }
+
+        # Set read-only community (value 4 = READ ONLY)
+        Set-ItemProperty -Path $snmpPath -Name "public" -Value 4 -Type DWord
+
+        Write-Output "SNMP service configured"
+      } else {
+        Write-Output "SNMP service not installed"
+      }
+  when: "'SNMP-Service' in (windows_features | map(attribute='name') | list)"
+
+- name: Configure Windows Time service
+  ansible.windows.win_powershell:
+    script: |
+      # Ensure W32Time is configured correctly
+      w32tm /config /update
+
+      # Set time service to auto-start
+      Set-Service -Name W32Time -StartupType Automatic
+
+      # Restart to apply changes
+      Restart-Service W32Time -Force
+
+      Write-Output "Windows Time service configured"
+  notify: Sync time
+
+- name: Display services configuration summary
+  ansible.builtin.debug:
+    msg: |
+      Services Configuration:
+      - Enabled: {{ windows_services_to_enable | map(attribute='name') | list | join(', ') }}
+      - Disabled: {{ windows_services_to_disable | map(attribute='name') | list | join(', ') }}
+    verbosity: 1

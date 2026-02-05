@@ -1,0 +1,77 @@
+---
+# tasks/firewall.yml - Configure Windows Firewall
+
+- name: Ensure Windows Firewall service is running
+  ansible.windows.win_service:
+    name: MpsSvc
+    state: started
+    start_mode: auto
+  when: windows_firewall_enabled | bool
+
+- name: Configure firewall profiles
+  community.windows.win_firewall:
+    state: enabled
+    profiles:
+      - Domain
+      - Private
+      - Public
+  when: windows_firewall_enabled | bool
+
+- name: Configure TCP/UDP firewall rules
+  community.windows.win_firewall_rule:
+    name: "{{ item.name }}"
+    localport: "{{ item.localport | default(omit) }}"
+    protocol: "{{ item.protocol }}"
+    direction: "{{ item.direction }}"
+    action: "{{ item.action }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    description: "{{ item.description | default('') }}"
+    profiles: "{{ item.profiles | default('Domain,Private,Public') }}"
+    state: present
+  loop: "{{ windows_firewall_rules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - windows_firewall_enabled | bool
+    - item.protocol in ['tcp', 'udp']
+
+- name: Configure ICMP firewall rules
+  community.windows.win_firewall_rule:
+    name: "{{ item.name }}"
+    protocol: "{{ item.protocol }}"
+    direction: "{{ item.direction }}"
+    action: "{{ item.action }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    description: "{{ item.description | default('') }}"
+    profiles: "{{ item.profiles | default('Domain,Private,Public') }}"
+    state: present
+  loop: "{{ windows_firewall_rules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - windows_firewall_enabled | bool
+    - item.protocol in ['icmpv4', 'icmpv6']
+
+- name: Block unnecessary outbound connections (optional)
+  community.windows.win_firewall_rule:
+    name: "Hyperion-Block-Telemetry"
+    direction: out
+    action: block
+    remoteip: "{{ item }}"
+    enabled: true
+    description: "Block unnecessary telemetry endpoints"
+    state: present
+  loop:
+    - "13.107.4.50"
+    - "13.107.5.88"
+  when:
+    - windows_firewall_enabled | bool
+    - windows_block_telemetry | default(false) | bool
+
+- name: Display firewall configuration summary
+  ansible.builtin.debug:
+    msg: |
+      Firewall Configuration:
+      - Firewall Enabled: {{ windows_firewall_enabled }}
+      - Rules Configured: {{ windows_firewall_rules | length }}
+    verbosity: 1

@@ -1,0 +1,36 @@
+---
+# tasks/features.yml - Install Windows features
+
+- name: Install required Windows features
+  ansible.windows.win_feature:
+    name: "{{ item.name }}"
+    state: "{{ item.state | default('present') }}"
+    include_management_tools: "{{ item.include_management_tools | default(true) }}"
+  loop: "{{ windows_features }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: feature_install_result
+  when: windows_features | length > 0
+
+- name: Install optional Windows features
+  ansible.windows.win_optional_feature:
+    name: "{{ item.name }}"
+    state: "{{ item.state | default('present') }}"
+  loop: "{{ windows_optional_features }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: optional_feature_result
+  when:
+    - windows_optional_features is defined
+    - windows_optional_features | length > 0
+  ignore_errors: true
+
+- name: Check if reboot is required after feature installation
+  ansible.builtin.set_fact:
+    _reboot_required: "{{ feature_install_result.results | selectattr('reboot_required', 'defined') | selectattr('reboot_required', 'equalto', true) | list | length > 0 }}"
+  when: feature_install_result is defined
+
+- name: Display features requiring reboot
+  ansible.builtin.debug:
+    msg: "Some features require a reboot to complete installation"
+  when: _reboot_required | default(false)

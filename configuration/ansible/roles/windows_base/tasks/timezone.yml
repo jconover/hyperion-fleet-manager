@@ -1,0 +1,12 @@
+---
+# tasks/timezone.yml - Configure Windows timezone
+
+- name: Set Windows timezone to {{ windows_timezone }}
+  community.windows.win_timezone:
+    timezone: "{{ windows_timezone }}"
+  register: timezone_result
+
+- name: Display timezone configuration result
+  ansible.builtin.debug:
+    msg: "Timezone configured: {{ windows_timezone }}"
+    verbosity: 1

@@ -1,0 +1,119 @@
+---
+# tasks/validate.yml - Validate configuration after role execution
+
+- name: Validate WinRM connectivity
+  ansible.windows.win_ping:
+  register: winrm_test
+
+- name: Validate timezone configuration
+  ansible.windows.win_powershell:
+    script: |
+      $tz = Get-TimeZone
+      Write-Output $tz.Id
+  register: timezone_check
+  failed_when: timezone_check.output[0] != windows_timezone
+  ignore_errors: true
+
+- name: Validate standard directories exist
+  ansible.windows.win_stat:
+    path: "{{ item.path }}"
+  loop: "{{ windows_standard_directories }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: directory_check
+
+- name: Validate Windows features installed
+  ansible.windows.win_powershell:
+    script: |
+      $features = @()
+      {% for feature in windows_features %}
+      {% if feature.state == 'present' %}
+      $f = Get-WindowsFeature -Name "{{ feature.name }}" -ErrorAction SilentlyContinue
+      if ($f -and $f.Installed) {
+        $features += "{{ feature.name }}: OK"
+      } else {
+        $features += "{{ feature.name }}: MISSING"
+      }
+      {% endif %}
+      {% endfor %}
+      $features | ForEach-Object { Write-Output $_ }
+  register: feature_check
+
+- name: Validate required services running
+  ansible.windows.win_service_info:
+    name: "{{ item.name }}"
+  loop: "{{ windows_services_to_enable }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: service_check
+  ignore_errors: true
+
+- name: Validate firewall status
+  ansible.windows.win_powershell:
+    script: |
+      $profiles = Get-NetFirewallProfile
+      $results = @()
+      foreach ($profile in $profiles) {
+        $results += "$($profile.Name): $($profile.Enabled)"
+      }
+      $results | ForEach-Object { Write-Output $_ }
+  register: firewall_check
+  when: windows_firewall_enabled | bool
+
+- name: Validate DSC modules installed
+  ansible.windows.win_powershell:
+    script: |
+      $modules = @()
+      {% for module in windows_dsc_modules %}
+      $m = Get-Module -ListAvailable -Name "{{ module.name }}" | Select-Object -First 1
+      if ($m) {
+        $modules += "{{ module.name }}: $($m.Version)"
+      } else {
+        $modules += "{{ module.name }}: NOT INSTALLED"
+      }
+      {% endfor %}
+      $modules | ForEach-Object { Write-Output $_ }
+  register: dsc_check
+
+- name: Generate validation report
+  ansible.builtin.set_fact:
+    validation_report:
+      hostname: "{{ inventory_hostname }}"
+      role_version: "{{ _windows_base_role_version }}"
+      timestamp: "{{ ansible_date_time.iso8601 }}"
+      winrm_status: "{{ 'OK' if winrm_test is succeeded else 'FAILED' }}"
+      timezone_status: "{{ 'OK' if timezone_check.output[0] == windows_timezone else 'MISMATCH' }}"
+      directories_created: "{{ directory_check.results | selectattr('stat.exists', 'equalto', true) | list | length }}"
+      features_installed: "{{ feature_check.output | select('search', 'OK') | list | length }}"
+      services_running: "{{ service_check.results | selectattr('exists', 'defined') | selectattr('exists', 'equalto', true) | list | length }}"
+      firewall_enabled: "{{ windows_firewall_enabled }}"
+      dsc_modules_installed: "{{ dsc_check.output | reject('search', 'NOT INSTALLED') | list | length }}"
+
+- name: Display validation summary
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      Validation Report - {{ inventory_hostname }}
+      ========================================
+      Role Version: {{ validation_report.role_version }}
+      Timestamp: {{ validation_report.timestamp }}
+
+      Configuration Status:
+      - WinRM: {{ validation_report.winrm_status }}
+      - Timezone: {{ validation_report.timezone_status }}
+      - Directories: {{ validation_report.directories_created }}/{{ windows_standard_directories | length }}
+      - Features: {{ validation_report.features_installed }}/{{ windows_features | selectattr('state', 'equalto', 'present') | list | length }}
+      - Services: {{ validation_report.services_running }}/{{ windows_services_to_enable | length }}
+      - Firewall: {{ 'Enabled' if validation_report.firewall_enabled else 'Disabled' }}
+      - DSC Modules: {{ validation_report.dsc_modules_installed }}/{{ windows_dsc_modules | length }}
+      ========================================
+
+- name: Save validation report to file
+  ansible.windows.win_copy:
+    content: "{{ validation_report | to_nice_json }}"
+    dest: "{{ hyperion_base_directory }}\\Reports\\validation_report.json"
+
+- name: Fail if critical validations failed
+  ansible.builtin.fail:
+    msg: "Critical validation failed - WinRM connectivity test failed"
+  when: winrm_test is failed

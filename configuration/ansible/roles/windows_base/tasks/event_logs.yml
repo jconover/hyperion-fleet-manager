@@ -1,0 +1,89 @@
+---
+# tasks/event_logs.yml - Configure Windows Event Log settings
+
+- name: Configure event log settings
+  ansible.windows.win_powershell:
+    script: |
+      $logName = "{{ item.name }}"
+      $maxSize = {{ item.maximum_size_kb }} * 1024  # Convert KB to bytes
+      $retentionDays = {{ item.retention_days }}
+      $overflowAction = "{{ item.overflow_action }}"
+
+      $log = Get-WinEvent -ListLog $logName -ErrorAction SilentlyContinue
+      if ($log) {
+        # Configure maximum size
+        Limit-EventLog -LogName $logName -MaximumSize $maxSize
+
+        # Configure retention
+        $log = Get-WinEvent -ListLog $logName
+
+        # Set overflow action via wevtutil for more control
+        switch ($overflowAction) {
+          "OverwriteAsNeeded" {
+            wevtutil sl $logName /rt:false
+          }
+          "OverwriteOlder" {
+            wevtutil sl $logName /rt:true /retention:{{ item.retention_days }}
+          }
+          "DoNotOverwrite" {
+            wevtutil sl $logName /rt:true
+          }
+        }
+
+        Write-Output "Configured $logName - MaxSize: $($maxSize/1024)KB, Overflow: $overflowAction"
+      } else {
+        Write-Output "Log $logName not found"
+      }
+  loop: "{{ windows_event_logs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: event_log_result
+
+- name: Create custom Hyperion event log
+  ansible.windows.win_powershell:
+    script: |
+      $logName = "Hyperion"
+      $sourceName = "Hyperion-FleetManager"
+
+      # Check if log exists
+      $logExists = [System.Diagnostics.EventLog]::Exists($logName)
+
+      if (-not $logExists) {
+        New-EventLog -LogName $logName -Source $sourceName
+        Limit-EventLog -LogName $logName -MaximumSize 52428800  # 50MB
+        Write-Output "Created Hyperion event log"
+      } else {
+        # Ensure source exists
+        $sourceExists = [System.Diagnostics.EventLog]::SourceExists($sourceName)
+        if (-not $sourceExists) {
+          [System.Diagnostics.EventLog]::CreateEventSource($sourceName, $logName)
+          Write-Output "Added source to existing Hyperion log"
+        } else {
+          Write-Output "Hyperion event log already configured"
+        }
+      }
+  register: custom_log_result
+
+- name: Enable audit logging for security events
+  ansible.windows.win_powershell:
+    script: |
+      # Enable process creation auditing
+      auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable
+
+      # Enable logon auditing
+      auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+
+      # Enable privilege use auditing
+      auditpol /set /subcategory:"Sensitive Privilege Use" /success:enable /failure:enable
+
+      Write-Output "Audit policies configured"
+  register: audit_result
+
+- name: Display event log configuration
+  ansible.builtin.debug:
+    msg: |
+      Event Log Configuration:
+      - Logs Configured: {{ windows_event_logs | length }}
+      - Custom Hyperion Log: Created
+      - Audit Policies: Enabled
+    verbosity: 1

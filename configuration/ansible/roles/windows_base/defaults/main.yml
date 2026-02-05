@@ -1,0 +1,228 @@
+---
+# defaults/main.yml - Default variables for windows_base role
+# These can be overridden in playbooks or inventory
+
+# =============================================================================
+# Timezone Configuration
+# =============================================================================
+windows_timezone: "UTC"
+
+# =============================================================================
+# Windows Features to Install
+# =============================================================================
+windows_features:
+  - name: Telnet-Client
+    state: present
+  - name: SNMP-Service
+    state: present
+  - name: Web-Mgmt-Tools
+    state: present
+  - name: NET-Framework-45-Core
+    state: present
+  - name: PowerShell-ISE
+    state: present
+  - name: RSAT-AD-PowerShell
+    state: present
+
+# Optional features - set to 'present' to install
+windows_optional_features:
+  - name: Windows-Defender
+    state: present
+  - name: WindowsServerBackup
+    state: absent
+
+# =============================================================================
+# Firewall Configuration
+# =============================================================================
+windows_firewall_enabled: true
+
+# Default firewall profiles configuration
+windows_firewall_profiles:
+  Domain:
+    enabled: true
+  Private:
+    enabled: true
+  Public:
+    enabled: true
+
+# Firewall rules to configure
+windows_firewall_rules:
+  - name: "Hyperion-WinRM-HTTPS"
+    localport: 5986
+    protocol: tcp
+    direction: in
+    action: allow
+    enabled: true
+    description: "Allow WinRM over HTTPS for Ansible management"
+
+  - name: "Hyperion-RDP"
+    localport: 3389
+    protocol: tcp
+    direction: in
+    action: allow
+    enabled: true
+    description: "Allow RDP access for administration"
+
+  - name: "Hyperion-ICMP-Echo"
+    protocol: icmpv4
+    direction: in
+    action: allow
+    enabled: true
+    icmp_type_code:
+      - "8:*"
+    description: "Allow ICMP Echo Request for health checks"
+
+  - name: "Hyperion-Health-Agent"
+    localport: 9100
+    protocol: tcp
+    direction: in
+    action: allow
+    enabled: true
+    description: "Allow health agent metrics endpoint"
+
+  - name: "Hyperion-SNMP"
+    localport: 161
+    protocol: udp
+    direction: in
+    action: allow
+    enabled: true
+    description: "Allow SNMP monitoring"
+
+# =============================================================================
+# Standard Directories
+# =============================================================================
+hyperion_base_directory: "C:\\Hyperion"
+
+windows_standard_directories:
+  - path: "C:\\Hyperion"
+    description: "Hyperion base directory"
+  - path: "C:\\Hyperion\\Logs"
+    description: "Application and system logs"
+  - path: "C:\\Hyperion\\Scripts"
+    description: "PowerShell and automation scripts"
+  - path: "C:\\Hyperion\\Config"
+    description: "Configuration files"
+  - path: "C:\\Hyperion\\Temp"
+    description: "Temporary files"
+  - path: "C:\\Hyperion\\Backup"
+    description: "Local backup storage"
+  - path: "C:\\Hyperion\\Reports"
+    description: "Health and status reports"
+
+# =============================================================================
+# WinRM Configuration
+# =============================================================================
+winrm_enable_https: true
+winrm_enable_http: false
+winrm_https_port: 5986
+winrm_http_port: 5985
+winrm_max_memory_per_shell_mb: 1024
+winrm_max_processes_per_shell: 25
+winrm_max_shells_per_user: 30
+winrm_idle_timeout_ms: 7200000
+winrm_allow_unencrypted: false
+
+# Certificate configuration for WinRM HTTPS
+winrm_cert_validity_days: 1095
+winrm_cert_subject: "CN={{ ansible_hostname }}"
+
+# =============================================================================
+# PowerShell Configuration
+# =============================================================================
+powershell_execution_policy: "RemoteSigned"
+powershell_enable_remoting: true
+
+# DSC modules to install from PowerShell Gallery
+windows_dsc_modules:
+  - name: ComputerManagementDsc
+    version: "8.5.0"
+  - name: NetworkingDsc
+    version: "9.0.0"
+  - name: SecurityPolicyDsc
+    version: "2.10.0.0"
+  - name: AuditPolicyDsc
+    version: "1.4.0.0"
+
+# =============================================================================
+# Windows Update Configuration
+# =============================================================================
+windows_update_enabled: true
+windows_update_auto_download: true
+windows_update_auto_install: false
+windows_update_scheduled_install_day: 0  # 0 = Every day, 1-7 = Sun-Sat
+windows_update_scheduled_install_time: 3  # 3 AM
+windows_update_include_recommended: true
+windows_update_no_auto_reboot: true
+
+# =============================================================================
+# Event Log Configuration
+# =============================================================================
+windows_event_logs:
+  - name: Application
+    maximum_size_kb: 102400
+    retention_days: 30
+    overflow_action: OverwriteAsNeeded
+  - name: Security
+    maximum_size_kb: 204800
+    retention_days: 90
+    overflow_action: OverwriteAsNeeded
+  - name: System
+    maximum_size_kb: 102400
+    retention_days: 30
+    overflow_action: OverwriteAsNeeded
+  - name: "Windows PowerShell"
+    maximum_size_kb: 51200
+    retention_days: 30
+    overflow_action: OverwriteAsNeeded
+
+# =============================================================================
+# Scheduled Tasks Configuration
+# =============================================================================
+windows_health_reporting_enabled: true
+windows_health_report_interval_minutes: 15
+windows_health_report_output_path: "C:\\Hyperion\\Reports"
+
+# =============================================================================
+# Service Configuration
+# =============================================================================
+windows_services_to_enable:
+  - name: WinRM
+    start_mode: auto
+  - name: SNMP
+    start_mode: auto
+  - name: W32Time
+    start_mode: auto
+
+windows_services_to_disable:
+  - name: XblAuthManager
+    start_mode: disabled
+  - name: XblGameSave
+    start_mode: disabled
+
+# =============================================================================
+# NTP Configuration
+# =============================================================================
+windows_ntp_enabled: true
+windows_ntp_servers:
+  - "169.254.169.123"  # AWS Time Sync Service
+  - "time.windows.com"
+
+# =============================================================================
+# Security Hardening
+# =============================================================================
+windows_disable_smb1: true
+windows_enable_smb_signing: true
+windows_enable_ldap_signing: true
+
+# Local security policy settings
+windows_password_policy:
+  minimum_length: 14
+  complexity_enabled: true
+  maximum_age_days: 90
+  minimum_age_days: 1
+  history_count: 24
+
+windows_lockout_policy:
+  threshold: 5
+  duration_minutes: 30
+  reset_minutes: 30

@@ -1,0 +1,55 @@
+---
+# tasks/directories.yml - Create standard Hyperion directories
+
+- name: Create Hyperion base directory
+  ansible.windows.win_file:
+    path: "{{ hyperion_base_directory }}"
+    state: directory
+
+- name: Create standard directories
+  ansible.windows.win_file:
+    path: "{{ item.path }}"
+    state: directory
+  loop: "{{ windows_standard_directories }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Create Ansible log directory
+  ansible.windows.win_file:
+    path: "{{ _ansible_log_path }}"
+    state: directory
+
+- name: Set directory permissions for Hyperion base
+  ansible.windows.win_acl:
+    path: "{{ hyperion_base_directory }}"
+    user: "BUILTIN\\Administrators"
+    rights: FullControl
+    type: allow
+    state: present
+    inherit: ContainerInherit, ObjectInherit
+
+- name: Restrict access to sensitive directories
+  ansible.windows.win_acl:
+    path: "{{ item }}"
+    user: "BUILTIN\\Users"
+    rights: Read,ReadAndExecute
+    type: allow
+    state: present
+  loop:
+    - "{{ hyperion_base_directory }}\\Scripts"
+    - "{{ hyperion_base_directory }}\\Config"
+
+- name: Create directory marker file
+  ansible.windows.win_copy:
+    content: |
+      # Hyperion Fleet Manager
+      # Directory created by Ansible windows_base role
+      # Role Version: {{ _windows_base_role_version }}
+      # Created: {{ ansible_date_time.iso8601 }}
+      # Host: {{ inventory_hostname }}
+    dest: "{{ hyperion_base_directory }}\\.hyperion"
+
+- name: Display created directories
+  ansible.builtin.debug:
+    msg: "Created {{ windows_standard_directories | length }} standard directories under {{ hyperion_base_directory }}"
+    verbosity: 1

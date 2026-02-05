@@ -1,0 +1,77 @@
+---
+# handlers/main.yml - Handlers for windows_base role
+
+- name: Restart WinRM
+  ansible.windows.win_service:
+    name: WinRM
+    state: restarted
+  listen: "Restart WinRM"
+
+- name: Restart SNMP
+  ansible.windows.win_service:
+    name: SNMP
+    state: restarted
+  listen: "Restart SNMP"
+  ignore_errors: true
+
+- name: Restart Windows Time
+  ansible.windows.win_service:
+    name: W32Time
+    state: restarted
+  listen: "Restart Windows Time"
+
+- name: Sync time
+  ansible.windows.win_powershell:
+    script: |
+      w32tm /resync /force
+      Write-Output "Time synchronized"
+  listen: "Sync time"
+
+- name: Restart Firewall
+  ansible.windows.win_service:
+    name: MpsSvc
+    state: restarted
+  listen: "Restart Firewall"
+
+- name: Flush DNS cache
+  ansible.windows.win_powershell:
+    script: |
+      Clear-DnsClientCache
+      Write-Output "DNS cache flushed"
+  listen: "Flush DNS cache"
+
+- name: Update Group Policy
+  ansible.windows.win_powershell:
+    script: |
+      gpupdate /force
+      Write-Output "Group Policy updated"
+  listen: "Update Group Policy"
+
+- name: Reboot Windows
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ _reboot_timeout_seconds }}"
+    post_reboot_delay: 30
+    msg: "Rebooting for Ansible configuration changes"
+  listen: "Reboot Windows"
+
+- name: Clear event logs
+  ansible.windows.win_powershell:
+    script: |
+      wevtutil cl Application
+      wevtutil cl System
+      Write-Output "Event logs cleared"
+  listen: "Clear event logs"
+
+- name: Restart LCM
+  ansible.windows.win_powershell:
+    script: |
+      Restart-Service -Name WinMgmt -Force
+      Write-Output "LCM restarted"
+  listen: "Restart LCM"
+
+- name: Refresh environment variables
+  ansible.windows.win_powershell:
+    script: |
+      $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+      Write-Output "Environment variables refreshed"
+  listen: "Refresh environment variables"

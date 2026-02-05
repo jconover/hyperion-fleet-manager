@@ -1,0 +1,77 @@
+---
+# tasks/dsc_modules.yml - Install PowerShell DSC modules
+
+- name: Install DSC modules from PowerShell Gallery
+  ansible.windows.win_powershell:
+    script: |
+      $moduleName = "{{ item.name }}"
+      $moduleVersion = "{{ item.version }}"
+
+      # Check if module is already installed with correct version
+      $installed = Get-Module -ListAvailable -Name $moduleName |
+        Where-Object { $_.Version -ge [Version]$moduleVersion } |
+        Sort-Object Version -Descending |
+        Select-Object -First 1
+
+      if (-not $installed) {
+        try {
+          Install-Module -Name $moduleName -RequiredVersion $moduleVersion -Force -AllowClobber -Scope AllUsers
+          Write-Output "Installed $moduleName version $moduleVersion"
+        } catch {
+          # Try without specific version if exact version not available
+          Install-Module -Name $moduleName -Force -AllowClobber -Scope AllUsers
+          $newVersion = (Get-Module -ListAvailable -Name $moduleName | Sort-Object Version -Descending | Select-Object -First 1).Version
+          Write-Output "Installed $moduleName version $newVersion (requested $moduleVersion)"
+        }
+      } else {
+        Write-Output "$moduleName already installed: $($installed.Version)"
+      }
+  loop: "{{ windows_dsc_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dsc_install_result
+
+- name: Verify DSC modules are available
+  ansible.windows.win_powershell:
+    script: |
+      $modules = @()
+      {% for module in windows_dsc_modules %}
+      $mod = Get-Module -ListAvailable -Name "{{ module.name }}" | Select-Object -First 1
+      if ($mod) {
+        $modules += "$($mod.Name): $($mod.Version)"
+      } else {
+        $modules += "{{ module.name }}: NOT FOUND"
+      }
+      {% endfor %}
+      $modules | ForEach-Object { Write-Output $_ }
+  register: dsc_verify_result
+
+- name: Display installed DSC modules
+  ansible.builtin.debug:
+    msg: "{{ dsc_verify_result.output }}"
+    verbosity: 1
+
+- name: Configure Local Configuration Manager (LCM)
+  ansible.windows.win_powershell:
+    script: |
+      [DSCLocalConfigurationManager()]
+      Configuration LCMConfig {
+        Node localhost {
+          Settings {
+            RefreshMode = 'Push'
+            ConfigurationMode = 'ApplyAndAutoCorrect'
+            ConfigurationModeFrequencyMins = 15
+            RebootNodeIfNeeded = $false
+            RefreshFrequencyMins = 30
+            AllowModuleOverwrite = $true
+          }
+        }
+      }
+
+      # Generate and apply LCM configuration
+      $outputPath = "{{ hyperion_base_directory }}\Config\LCMConfig"
+      LCMConfig -OutputPath $outputPath
+      Set-DscLocalConfigurationManager -Path $outputPath -Force
+
+      Write-Output "LCM configured successfully"
+  register: lcm_config_result
