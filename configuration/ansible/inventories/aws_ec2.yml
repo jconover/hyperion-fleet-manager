@@ -1,0 +1,181 @@
+# =============================================================================
+# Hyperion Fleet Manager - AWS EC2 Dynamic Inventory Configuration
+# =============================================================================
+# This file configures Ansible's aws_ec2 dynamic inventory plugin to
+# automatically discover and group EC2 instances managed by Hyperion.
+#
+# Requirements:
+#   - boto3 and botocore Python packages installed
+#   - AWS credentials configured (environment variables, IAM role, or AWS CLI)
+#   - amazon.aws collection installed: ansible-galaxy collection install amazon.aws
+#
+# Usage:
+#   ansible-inventory -i aws_ec2.yml --list
+#   ansible-inventory -i aws_ec2.yml --graph
+#   ansible-playbook -i aws_ec2.yml playbook.yml
+#
+# Documentation:
+#   https://docs.ansible.com/ansible/latest/collections/amazon/aws/aws_ec2_inventory.html
+# =============================================================================
+
+# Specify the inventory plugin to use
+plugin: amazon.aws.aws_ec2
+
+# -----------------------------------------------------------------------------
+# AWS Region Configuration
+# -----------------------------------------------------------------------------
+# The AWS region to query for EC2 instances.
+# Uses AWS_REGION environment variable if set, defaults to us-east-1.
+# For multi-region deployments, create separate inventory files per region
+# or use a list of regions.
+regions:
+  - "{{ lookup('ansible.builtin.env', 'AWS_REGION', default='us-east-1') }}"
+
+# -----------------------------------------------------------------------------
+# Instance Filters
+# -----------------------------------------------------------------------------
+# Filter instances to only include those managed by Hyperion Fleet Manager.
+# This prevents accidental management of unrelated EC2 instances.
+filters:
+  # Only include instances with the Hyperion project tag
+  tag:Project:
+    - hyperion-fleet-manager
+
+  # Only include running instances (exclude terminated, stopped, etc.)
+  instance-state-name:
+    - running
+
+# -----------------------------------------------------------------------------
+# Keyed Groups - Dynamic Group Creation
+# -----------------------------------------------------------------------------
+# Create Ansible groups based on EC2 instance tags and attributes.
+# This enables targeting specific subsets of instances in playbooks.
+keyed_groups:
+  # Group by Environment tag (e.g., env_dev, env_staging, env_prod)
+  # Allows targeting: ansible-playbook -l env_prod playbook.yml
+  - key: tags.Environment | default('unknown')
+    prefix: env
+    separator: "_"
+
+  # Group by Role tag (e.g., role_baseline, role_appserver, role_buildagent)
+  # Allows targeting: ansible-playbook -l role_appserver playbook.yml
+  - key: tags.Role | default('unassigned')
+    prefix: role
+    separator: "_"
+
+  # Group by instance type (e.g., instance_type_t3_large)
+  # Useful for capacity planning and type-specific configurations
+  - key: instance_type | replace('.', '_')
+    prefix: instance_type
+    separator: "_"
+
+  # Group by availability zone (e.g., az_us_east_1a)
+  # Useful for AZ-aware deployments and maintenance
+  - key: placement.availability_zone | replace('-', '_')
+    prefix: az
+    separator: "_"
+
+  # Group by platform (creates 'platform_windows' group)
+  # All Windows instances will be in this group
+  - key: platform | default('linux')
+    prefix: platform
+    separator: "_"
+
+  # Group by VPC ID (e.g., vpc_vpc_0123456789abcdef0)
+  # Useful when managing instances across multiple VPCs
+  - key: vpc_id
+    prefix: vpc
+    separator: "_"
+
+# -----------------------------------------------------------------------------
+# Static Groups
+# -----------------------------------------------------------------------------
+# Create static groups based on filter conditions.
+# The 'windows' group is critical for applying Windows-specific variables.
+groups:
+  # All Windows instances - used to apply windows.yml group_vars
+  windows: platform == 'windows'
+
+  # All Linux instances (if any exist in the fleet)
+  linux: platform != 'windows'
+
+  # Production environment (alternative grouping)
+  production: "'prod' in (tags.Environment | default(''))"
+
+  # Non-production environments
+  nonproduction: "'prod' not in (tags.Environment | default(''))"
+
+# -----------------------------------------------------------------------------
+# Host Variables - Instance Metadata
+# -----------------------------------------------------------------------------
+# Compose additional host variables from EC2 instance attributes.
+# These variables are available in playbooks as hostvars[inventory_hostname].
+compose:
+  # Connection settings for Windows hosts using WinRM
+  ansible_host: private_ip_address
+  ansible_connection: "'winrm'"
+  ansible_winrm_transport: "'ntlm'"
+  ansible_winrm_scheme: "'https'"
+  ansible_port: 5986
+
+  # Instance identification variables
+  ec2_instance_id: instance_id
+  ec2_private_ip: private_ip_address
+  ec2_public_ip: public_ip_address | default('')
+  ec2_private_dns: private_dns_name
+  ec2_public_dns: public_dns_name | default('')
+
+  # Instance metadata
+  ec2_instance_type: instance_type
+  ec2_availability_zone: placement.availability_zone
+  ec2_region: placement.region
+  ec2_vpc_id: vpc_id
+  ec2_subnet_id: subnet_id
+  ec2_ami_id: image_id
+  ec2_launch_time: launch_time
+
+  # Tags as variables (sanitized for use as Ansible variables)
+  ec2_tag_name: tags.Name | default('')
+  ec2_tag_environment: tags.Environment | default('unknown')
+  ec2_tag_role: tags.Role | default('unassigned')
+  ec2_tag_owner: tags.Owner | default('')
+  ec2_tag_cost_center: tags.CostCenter | default('')
+
+# -----------------------------------------------------------------------------
+# Caching Configuration
+# -----------------------------------------------------------------------------
+# Enable caching to improve performance and reduce AWS API calls.
+# Cache is stored locally and refreshed based on timeout.
+cache: true
+cache_plugin: ansible.builtin.jsonfile
+cache_connection: /tmp/ansible_aws_ec2_cache
+cache_timeout: 300  # Cache valid for 5 minutes
+
+# -----------------------------------------------------------------------------
+# Hostname Configuration
+# -----------------------------------------------------------------------------
+# Define how inventory hostnames are generated.
+# Using private DNS name ensures unique, resolvable hostnames.
+hostnames:
+  # Priority order for hostname selection
+  - tag:Name                    # Use Name tag if available
+  - private-dns-name            # Fall back to private DNS name
+  - private-ip-address          # Last resort: use private IP
+
+# -----------------------------------------------------------------------------
+# Strict Mode
+# -----------------------------------------------------------------------------
+# When true, errors in keyed_groups expressions will cause the plugin to fail.
+# Recommended to keep as false for resilience against missing tags.
+strict: false
+
+# -----------------------------------------------------------------------------
+# Include/Exclude Patterns
+# -----------------------------------------------------------------------------
+# Optionally limit which instances are included based on hostname patterns.
+# Uncomment and modify as needed.
+# include_filters:
+#   - tag:Name:
+#       - 'hyperion-*'
+# exclude_hosts:
+#   - 'hyperion-test-*'

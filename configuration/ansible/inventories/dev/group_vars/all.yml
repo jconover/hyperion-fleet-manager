@@ -1,0 +1,125 @@
+---
+# Group Variables for All Hosts - Development Environment
+#
+# These variables apply to all hosts in the development inventory.
+# More permissive settings than production for testing.
+
+# =============================================================================
+# Environment Configuration
+# =============================================================================
+hyperion_environment: development
+hyperion_environment_short: dev
+
+# =============================================================================
+# Connection Settings
+# =============================================================================
+ansible_connection: winrm
+ansible_port: 5986
+ansible_winrm_transport: ntlm
+ansible_winrm_scheme: https
+ansible_winrm_server_cert_validation: ignore
+ansible_winrm_operation_timeout_sec: 120
+ansible_winrm_read_timeout_sec: 180
+
+ansible_become: true
+ansible_become_method: runas
+ansible_become_user: Administrator
+
+# =============================================================================
+# Baseline Configuration
+# =============================================================================
+baseline_apply_windows_base: true
+baseline_apply_chocolatey: true
+baseline_apply_security_hardening: true
+
+hyperion_timezone: "UTC"
+hyperion_ntp_servers: "time.aws.com"
+
+# =============================================================================
+# Package Management
+# =============================================================================
+# Extended packages for development
+baseline_common_packages:
+  - name: 7zip
+    state: present
+  - name: notepadplusplus
+    state: present
+  - name: git
+    state: present
+  - name: awscli
+    state: present
+  - name: powershell-core
+    state: present
+  - name: sysinternals
+    state: present
+  - name: vscode
+    state: present
+  - name: googlechrome
+    state: present
+
+chocolatey_source: "https://community.chocolatey.org/api/v2/"
+
+# =============================================================================
+# Security Settings
+# =============================================================================
+security_hardening_enabled: true
+firewall_enabled: true
+
+# =============================================================================
+# Patch Management
+# =============================================================================
+# More aggressive patching for dev
+patch_categories:
+  - SecurityUpdates
+  - CriticalUpdates
+  - UpdateRollups
+  - Updates
+
+# Faster rolling updates in dev
+patch_serial: "50%"
+patch_max_fail_percentage: 25
+
+# Allow reboots in development
+hyperion_allow_reboot: true
+patch_allow_reboot: true
+patch_reboot_timeout: 900
+patch_post_reboot_delay: 60
+
+# =============================================================================
+# Compliance Configuration
+# =============================================================================
+hyperion_compliance_bucket: "hyperion-compliance-reports-dev"
+compliance_s3_prefix: "development/compliance"
+
+# Lower thresholds for dev
+compliance_warning_threshold: 80
+compliance_critical_threshold: 60
+
+# =============================================================================
+# Health Check Configuration
+# =============================================================================
+hyperion_health_bucket: "hyperion-health-reports-dev"
+health_s3_prefix: "development/health"
+
+# More lenient thresholds for dev
+disk_warning_threshold: 15
+disk_critical_threshold: 5
+memory_warning_threshold: 85
+memory_critical_threshold: 95
+cpu_warning_threshold: 85
+cpu_critical_threshold: 95
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+hyperion_log_base: "C:\\Hyperion\\Logs"
+hyperion_config_base: "C:\\Hyperion\\Config"
+hyperion_report_base: "C:\\Hyperion\\Reports"
+
+# =============================================================================
+# Tags for AWS Resources
+# =============================================================================
+hyperion_tags:
+  Environment: development
+  Project: hyperion-fleet-manager
+  ManagedBy: ansible

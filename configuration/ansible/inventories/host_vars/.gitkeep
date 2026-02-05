@@ -1,0 +1,30 @@
+# =============================================================================
+# Hyperion Fleet Manager - Host-Specific Variables Directory
+# =============================================================================
+# This directory contains host-specific variable files.
+#
+# Usage:
+#   Create a YAML file named after the inventory hostname to define
+#   variables specific to that host.
+#
+# Example:
+#   host_vars/hyperion-web-prod-01.yml:
+#   ---
+#   ansible_host: 10.0.1.50
+#   hyperion_custom_setting: value
+#
+# Variable Precedence:
+#   host_vars take precedence over group_vars, allowing you to override
+#   group-level settings for specific hosts.
+#
+# Security Note:
+#   For sensitive host-specific values (credentials, keys), use Ansible Vault:
+#   ansible-vault create host_vars/hostname.yml
+#   ansible-vault edit host_vars/hostname.yml
+#
+# Best Practices:
+#   - Use host_vars sparingly; prefer group_vars for consistency
+#   - Document why a host needs specific overrides
+#   - Review host_vars during security audits
+#   - Keep file names consistent with inventory hostnames
+# =============================================================================

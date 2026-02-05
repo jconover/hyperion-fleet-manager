@@ -1,0 +1,32 @@
+---
+# Ansible Galaxy Requirements for Hyperion Fleet Manager
+#
+# Install with: ansible-galaxy install -r requirements.yml
+# Or: ansible-galaxy collection install -r requirements.yml
+
+collections:
+  # Windows automation collection (required for Windows management)
+  - name: ansible.windows
+    version: ">=2.1.0"
+
+  # Community Windows collection (extended Windows functionality)
+  - name: community.windows
+    version: ">=2.0.0"
+
+  # Chocolatey collection (Windows package management)
+  - name: chocolatey.chocolatey
+    version: ">=1.5.0"
+
+  # Amazon AWS collection (for S3 uploads and AWS integration)
+  - name: amazon.aws
+    version: ">=6.0.0"
+
+  # Community General collection (utility modules)
+  - name: community.general
+    version: ">=7.0.0"
+
+roles:
+  # Note: Define project-specific roles here if using Galaxy roles
+  # Example:
+  # - name: geerlingguy.docker
+  #   version: 6.1.0

@@ -1,0 +1,359 @@
+# =============================================================================
+# Hyperion Fleet Manager - Windows-Specific Ansible Variables
+# =============================================================================
+# Variables defined here apply to all hosts in the 'windows' group.
+# These settings configure Windows-specific connection parameters, paths,
+# and default configurations for the Windows server fleet.
+#
+# This file is automatically applied to hosts that match the 'windows' group
+# as defined in the aws_ec2.yml dynamic inventory.
+#
+# Security Note:
+#   DO NOT store sensitive values (passwords, keys) in this file.
+#   Use Ansible Vault or AWS Secrets Manager for secrets.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# WinRM Connection Settings
+# -----------------------------------------------------------------------------
+# Configuration for Windows Remote Management (WinRM) connections
+
+# Connection type - must be 'winrm' for Windows hosts
+ansible_connection: winrm
+
+# WinRM transport protocol
+# Options:
+#   - ntlm: NT LAN Manager authentication (recommended for domain environments)
+#   - kerberos: Kerberos authentication (requires domain controller access)
+#   - credssp: Credential Security Support Provider (supports credential delegation)
+#   - basic: Basic authentication (not recommended, requires HTTPS)
+ansible_winrm_transport: ntlm
+
+# WinRM scheme (http or https)
+# HTTPS is strongly recommended for production environments
+ansible_winrm_scheme: https
+
+# WinRM port
+# 5985 = HTTP (not recommended)
+# 5986 = HTTPS (recommended)
+ansible_port: 5986
+
+# Certificate validation
+# 'ignore' - Skip certificate validation (for self-signed certs)
+# 'validate' - Require valid CA-signed certificate
+ansible_winrm_server_cert_validation: ignore
+
+# WinRM connection timeout in seconds
+ansible_winrm_connection_timeout: 60
+
+# WinRM operation timeout in seconds
+ansible_winrm_operation_timeout_sec: 120
+
+# WinRM read timeout in seconds (should be > operation timeout)
+ansible_winrm_read_timeout_sec: 180
+
+# Enable WinRM message encryption
+# Recommended even over HTTPS for defense in depth
+ansible_winrm_message_encryption: auto
+
+# -----------------------------------------------------------------------------
+# PowerShell Configuration
+# -----------------------------------------------------------------------------
+# Settings for PowerShell execution on Windows hosts
+
+# PowerShell execution policy for Ansible tasks
+# Options: Bypass, Unrestricted, RemoteSigned, AllSigned, Restricted
+# Bypass is recommended for Ansible to ensure scripts execute properly
+hyperion_powershell_execution_policy: Bypass
+
+# Default PowerShell arguments for Ansible
+# -NonInteractive: Prevents prompts that would hang automation
+# -NoProfile: Skips loading user profiles for faster execution
+ansible_shell_type: powershell
+ansible_become_method: runas
+
+# PowerShell module paths
+hyperion_powershell_module_paths:
+  - 'C:\Program Files\WindowsPowerShell\Modules'
+  - 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules'
+  - 'C:\ProgramData\Hyperion\Modules'
+
+# -----------------------------------------------------------------------------
+# Hyperion Directory Structure
+# -----------------------------------------------------------------------------
+# Standard directory paths for Hyperion Fleet Manager on Windows hosts
+
+# Base installation directory
+hyperion_base_path: 'C:\ProgramData\Hyperion'
+
+# Configuration files directory
+hyperion_config_path: '{{ hyperion_base_path }}\Config'
+
+# Log files directory
+hyperion_log_path: '{{ hyperion_base_path }}\Logs'
+
+# Temporary files directory
+hyperion_temp_path: '{{ hyperion_base_path }}\Temp'
+
+# Scripts directory
+hyperion_scripts_path: '{{ hyperion_base_path }}\Scripts'
+
+# Backup directory
+hyperion_backup_path: '{{ hyperion_base_path }}\Backup'
+
+# Data directory
+hyperion_data_path: '{{ hyperion_base_path }}\Data'
+
+# Cache directory
+hyperion_cache_path: '{{ hyperion_base_path }}\Cache'
+
+# Agent installation directory
+hyperion_agent_path: '{{ hyperion_base_path }}\Agent'
+
+# Certificates directory
+hyperion_certs_path: '{{ hyperion_base_path }}\Certs'
+
+# List of all directories to create during provisioning
+hyperion_directories:
+  - "{{ hyperion_config_path }}"
+  - "{{ hyperion_log_path }}"
+  - "{{ hyperion_temp_path }}"
+  - "{{ hyperion_scripts_path }}"
+  - "{{ hyperion_backup_path }}"
+  - "{{ hyperion_data_path }}"
+  - "{{ hyperion_cache_path }}"
+  - "{{ hyperion_agent_path }}"
+  - "{{ hyperion_certs_path }}"
+
+# -----------------------------------------------------------------------------
+# Windows Service Configuration
+# -----------------------------------------------------------------------------
+# Settings for Windows services managed by Hyperion
+
+# Service account settings
+# SECURITY: Use managed service accounts or gMSAs in production
+hyperion_service_account: 'NT SERVICE\HyperionAgent'
+hyperion_service_startup_type: auto  # auto, delayed, manual, disabled
+
+# Services managed by Hyperion
+hyperion_managed_services:
+  - name: HyperionAgent
+    display_name: Hyperion Fleet Agent
+    description: Hyperion Fleet Manager monitoring and management agent
+    path: '{{ hyperion_agent_path }}\HyperionAgent.exe'
+    startup_type: auto
+
+  - name: HyperionMonitor
+    display_name: Hyperion Monitoring Service
+    description: Collects and forwards metrics to CloudWatch
+    path: '{{ hyperion_agent_path }}\HyperionMonitor.exe'
+    startup_type: auto
+
+# -----------------------------------------------------------------------------
+# Windows Feature Configuration
+# -----------------------------------------------------------------------------
+# Windows features and roles to install/configure
+
+# Required Windows features for Hyperion servers
+hyperion_windows_features:
+  - name: NET-Framework-45-Core
+    state: present
+  - name: PowerShell
+    state: present
+  - name: RSAT-AD-PowerShell
+    state: present
+  - name: Web-Server
+    state: "{{ 'present' if ec2_tag_role | default('') == 'appserver' else 'absent' }}"
+  - name: Telnet-Client
+    state: "{{ 'present' if hyperion_env_config[hyperion_environment].enable_debug_tools else 'absent' }}"
+
+# -----------------------------------------------------------------------------
+# Windows Firewall Configuration
+# -----------------------------------------------------------------------------
+# Firewall rules for Hyperion services
+
+hyperion_firewall_rules:
+  - name: Hyperion-Agent-Inbound
+    direction: in
+    action: allow
+    protocol: tcp
+    localport: 8443
+    description: Hyperion Agent management port
+
+  - name: Hyperion-Metrics-Inbound
+    direction: in
+    action: allow
+    protocol: tcp
+    localport: 9100
+    description: Hyperion metrics collection port
+
+  - name: WinRM-HTTPS
+    direction: in
+    action: allow
+    protocol: tcp
+    localport: 5986
+    description: WinRM HTTPS for Ansible management
+
+# -----------------------------------------------------------------------------
+# Windows Update Configuration
+# -----------------------------------------------------------------------------
+# Settings for Windows Update management
+
+hyperion_windows_update:
+  # Enable automatic updates
+  enabled: "{{ hyperion_features.auto_patching }}"
+
+  # Update categories to install
+  categories:
+    - SecurityUpdates
+    - CriticalUpdates
+    - UpdateRollups
+
+  # Reboot behavior
+  auto_reboot: false
+  reboot_timeout: 600
+
+  # Maintenance window check
+  respect_maintenance_window: true
+
+# -----------------------------------------------------------------------------
+# Logging and Monitoring
+# -----------------------------------------------------------------------------
+# Windows-specific logging configuration
+
+hyperion_windows_logging:
+  # Event log settings
+  event_log:
+    max_size_mb: 512
+    retention_days: 30
+
+  # Application log paths
+  application_logs:
+    - name: Hyperion-Agent
+      path: '{{ hyperion_log_path }}\agent.log'
+      max_size_mb: 100
+      keep_files: 10
+
+    - name: Hyperion-Monitor
+      path: '{{ hyperion_log_path }}\monitor.log'
+      max_size_mb: 100
+      keep_files: 10
+
+# CloudWatch agent configuration for Windows
+hyperion_cloudwatch_agent:
+  enabled: true
+  config_path: '{{ hyperion_config_path }}\cloudwatch-agent.json'
+  collect_logs: true
+  collect_metrics: true
+  metrics_interval: "{{ hyperion_env_config[hyperion_environment].monitoring_interval }}"
+
+# -----------------------------------------------------------------------------
+# Security Configuration
+# -----------------------------------------------------------------------------
+# Windows-specific security settings
+
+hyperion_windows_security:
+  # Local security policy settings
+  password_policy:
+    min_length: 14
+    complexity_enabled: true
+    max_age_days: 90
+    history_count: 24
+
+  # Account lockout settings
+  lockout_policy:
+    threshold: "{{ hyperion_security.lockout_threshold }}"
+    duration_minutes: "{{ hyperion_security.lockout_duration_minutes }}"
+    reset_count_minutes: 30
+
+  # Audit policy
+  audit_policy:
+    logon_events: 'Success, Failure'
+    object_access: 'Success, Failure'
+    privilege_use: 'Failure'
+    process_tracking: 'Success'
+
+  # User rights assignments
+  user_rights:
+    log_on_as_service:
+      - "{{ hyperion_service_account }}"
+    log_on_as_batch:
+      - "{{ hyperion_service_account }}"
+
+# -----------------------------------------------------------------------------
+# Performance Configuration
+# -----------------------------------------------------------------------------
+# Performance-related settings for Windows hosts
+
+hyperion_windows_performance:
+  # Page file configuration
+  pagefile:
+    managed_by_system: false
+    initial_size_mb: 4096
+    maximum_size_mb: 8192
+
+  # Power plan
+  power_plan: high_performance
+
+  # Visual effects (disable for servers)
+  visual_effects: adjust_for_best_performance
+
+# -----------------------------------------------------------------------------
+# Backup Configuration
+# -----------------------------------------------------------------------------
+# Windows-specific backup settings
+
+hyperion_windows_backup:
+  enabled: "{{ hyperion_features.backup_enabled }}"
+  paths:
+    - '{{ hyperion_config_path }}'
+    - '{{ hyperion_data_path }}'
+  exclude_paths:
+    - '{{ hyperion_temp_path }}'
+    - '{{ hyperion_cache_path }}'
+  schedule: daily
+  retention_count: "{{ hyperion_env_config[hyperion_environment].backup_retention_days }}"
+
+# -----------------------------------------------------------------------------
+# Package Management
+# -----------------------------------------------------------------------------
+# Chocolatey package manager configuration
+
+hyperion_chocolatey:
+  enabled: true
+  source: https://community.chocolatey.org/api/v2/
+
+  # Common packages to install
+  packages:
+    - name: notepadplusplus
+      state: "{{ 'present' if hyperion_env_config[hyperion_environment].enable_debug_tools else 'absent' }}"
+    - name: 7zip
+      state: present
+    - name: awscli
+      state: present
+    - name: python
+      version: '3.11.0'
+      state: present
+
+# -----------------------------------------------------------------------------
+# Time and Regional Settings
+# -----------------------------------------------------------------------------
+# Time synchronization and regional configuration
+
+hyperion_windows_time:
+  # NTP servers (use AWS time sync service in AWS)
+  ntp_servers:
+    - 169.254.169.123  # AWS Time Sync Service
+    - time.windows.com
+
+  # Timezone
+  timezone: UTC
+
+  # Synchronization interval in seconds
+  sync_interval: 3600
+
+# Regional settings
+hyperion_windows_regional:
+  locale: en-US
+  system_locale: en-US
+  input_locale: 0409:00000409  # English (United States)

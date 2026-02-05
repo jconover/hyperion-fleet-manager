@@ -1,0 +1,136 @@
+---
+# Group Variables for All Hosts - Production Environment
+#
+# These variables apply to all hosts in the production inventory.
+# Override per-group or per-host as needed.
+
+# =============================================================================
+# Environment Configuration
+# =============================================================================
+hyperion_environment: production
+hyperion_environment_short: prod
+
+# =============================================================================
+# Connection Settings
+# =============================================================================
+# WinRM over HTTPS (port 5986)
+ansible_connection: winrm
+ansible_port: 5986
+ansible_winrm_transport: ntlm
+ansible_winrm_scheme: https
+ansible_winrm_server_cert_validation: ignore
+ansible_winrm_operation_timeout_sec: 120
+ansible_winrm_read_timeout_sec: 180
+
+# Become settings for elevated operations
+ansible_become: true
+ansible_become_method: runas
+ansible_become_user: Administrator
+
+# =============================================================================
+# Baseline Configuration
+# =============================================================================
+# Apply all baseline components by default
+baseline_apply_windows_base: true
+baseline_apply_chocolatey: true
+baseline_apply_security_hardening: true
+
+# Timezone configuration
+hyperion_timezone: "UTC"
+
+# NTP configuration
+hyperion_ntp_servers: "time.aws.com"
+
+# =============================================================================
+# Package Management
+# =============================================================================
+# Default packages for all production hosts
+baseline_common_packages:
+  - name: 7zip
+    state: present
+  - name: notepadplusplus
+    state: present
+  - name: git
+    state: present
+  - name: awscli
+    state: present
+  - name: powershell-core
+    state: present
+  - name: sysinternals
+    state: present
+
+# Chocolatey configuration
+chocolatey_source: "https://community.chocolatey.org/api/v2/"
+
+# =============================================================================
+# Security Settings
+# =============================================================================
+# Security hardening enabled for production
+security_hardening_enabled: true
+
+# Firewall configuration
+firewall_enabled: true
+firewall_profiles:
+  - Domain
+  - Private
+  - Public
+
+# =============================================================================
+# Patch Management
+# =============================================================================
+# Conservative patching for production
+patch_categories:
+  - SecurityUpdates
+  - CriticalUpdates
+
+# Rolling update configuration (20% at a time)
+patch_serial: "20%"
+patch_max_fail_percentage: 10
+
+# Reboot handling (disabled by default for production safety)
+hyperion_allow_reboot: false
+patch_allow_reboot: false
+patch_reboot_timeout: 1800
+patch_post_reboot_delay: 120
+
+# =============================================================================
+# Compliance Configuration
+# =============================================================================
+# S3 bucket for compliance reports
+hyperion_compliance_bucket: "hyperion-compliance-reports-prod"
+compliance_s3_prefix: "production/compliance"
+
+# Compliance thresholds
+compliance_warning_threshold: 90
+compliance_critical_threshold: 70
+
+# =============================================================================
+# Health Check Configuration
+# =============================================================================
+# S3 bucket for health reports
+hyperion_health_bucket: "hyperion-health-reports-prod"
+health_s3_prefix: "production/health"
+
+# Health thresholds
+disk_warning_threshold: 20
+disk_critical_threshold: 10
+memory_warning_threshold: 80
+memory_critical_threshold: 90
+cpu_warning_threshold: 80
+cpu_critical_threshold: 90
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+# Local log paths on Windows hosts
+hyperion_log_base: "C:\\Hyperion\\Logs"
+hyperion_config_base: "C:\\Hyperion\\Config"
+hyperion_report_base: "C:\\Hyperion\\Reports"
+
+# =============================================================================
+# Tags for AWS Resources
+# =============================================================================
+hyperion_tags:
+  Environment: production
+  Project: hyperion-fleet-manager
+  ManagedBy: ansible

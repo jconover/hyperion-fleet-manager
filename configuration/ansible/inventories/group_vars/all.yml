@@ -1,0 +1,210 @@
+# =============================================================================
+# Hyperion Fleet Manager - Global Ansible Variables
+# =============================================================================
+# Variables defined here apply to ALL hosts in the inventory.
+# These settings establish baseline configuration for the entire fleet.
+#
+# Variable Precedence (lowest to highest):
+#   1. group_vars/all.yml (this file)
+#   2. group_vars/<group>.yml
+#   3. host_vars/<hostname>.yml
+#   4. Playbook vars
+#   5. Extra vars (-e)
+#
+# Security Note:
+#   DO NOT store sensitive values (passwords, keys) in this file.
+#   Use Ansible Vault or AWS Secrets Manager for secrets.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Connection Settings
+# -----------------------------------------------------------------------------
+# Default connection settings for all hosts.
+# Windows-specific settings are defined in group_vars/windows.yml
+
+# Ansible user for SSH/WinRM connections
+# Override per environment using group_vars or host_vars
+# For Windows: This should be a domain user or local administrator
+# SECURITY: Use Ansible Vault to encrypt credentials in production
+ansible_user: "{{ lookup('ansible.builtin.env', 'ANSIBLE_USER', default='ansible_service') }}"
+
+# WinRM certificate validation
+# Set to 'ignore' for self-signed certificates (common in enterprise environments)
+# Set to 'validate' when using CA-signed certificates
+ansible_winrm_server_cert_validation: ignore
+
+# WinRM transport protocol
+# Options: ntlm, kerberos, credssp, basic
+# NTLM is recommended for domain-joined Windows servers
+ansible_winrm_transport: ntlm
+
+# WinRM port (HTTPS)
+# 5985 = HTTP (not recommended for production)
+# 5986 = HTTPS (recommended)
+ansible_port: 5986
+
+# Connection timeout in seconds
+ansible_timeout: 60
+
+# -----------------------------------------------------------------------------
+# Project Metadata
+# -----------------------------------------------------------------------------
+# These variables identify the project and are used in tags and configurations
+
+hyperion_project_name: hyperion-fleet-manager
+hyperion_project_version: "1.0.0"
+hyperion_managed_by: ansible
+
+# -----------------------------------------------------------------------------
+# Common Tags
+# -----------------------------------------------------------------------------
+# Tags applied to resources created or modified by Ansible
+# These should align with Terraform tagging strategy
+
+common_tags:
+  Project: "{{ hyperion_project_name }}"
+  ManagedBy: "{{ hyperion_managed_by }}"
+  Version: "{{ hyperion_project_version }}"
+  # Environment and Role tags are typically set per-group or per-host
+
+# -----------------------------------------------------------------------------
+# Environment Configuration
+# -----------------------------------------------------------------------------
+# Default environment - override in group_vars for specific environments
+
+hyperion_environment: "{{ ec2_tag_environment | default('dev') }}"
+
+# Environment-specific settings map
+# Access via: hyperion_env_config[hyperion_environment]
+hyperion_env_config:
+  dev:
+    log_level: debug
+    monitoring_interval: 60
+    backup_retention_days: 7
+    enable_debug_tools: true
+  staging:
+    log_level: info
+    monitoring_interval: 60
+    backup_retention_days: 14
+    enable_debug_tools: true
+  prod:
+    log_level: warn
+    monitoring_interval: 30
+    backup_retention_days: 90
+    enable_debug_tools: false
+
+# -----------------------------------------------------------------------------
+# AWS Configuration
+# -----------------------------------------------------------------------------
+# AWS-related settings used across playbooks
+
+aws_region: "{{ lookup('ansible.builtin.env', 'AWS_REGION', default='us-east-1') }}"
+
+# S3 bucket for Ansible artifacts (logs, reports, etc.)
+hyperion_s3_artifacts_bucket: "hyperion-ansible-artifacts-{{ hyperion_environment }}"
+
+# CloudWatch log group for Ansible execution logs
+hyperion_cloudwatch_log_group: "/hyperion/ansible/{{ hyperion_environment }}"
+
+# -----------------------------------------------------------------------------
+# Notification Settings
+# -----------------------------------------------------------------------------
+# Configure notifications for playbook execution results
+
+hyperion_notifications_enabled: true
+hyperion_notification_channels:
+  - type: cloudwatch
+    enabled: true
+  - type: sns
+    enabled: "{{ hyperion_environment == 'prod' }}"
+    topic_arn: "arn:aws:sns:{{ aws_region }}:{{ lookup('ansible.builtin.env', 'AWS_ACCOUNT_ID', default='000000000000') }}:hyperion-alerts"
+
+# -----------------------------------------------------------------------------
+# Retry and Error Handling
+# -----------------------------------------------------------------------------
+# Default retry settings for tasks that may fail transiently
+
+hyperion_default_retries: 3
+hyperion_default_delay: 10
+hyperion_default_timeout: 300
+
+# -----------------------------------------------------------------------------
+# Maintenance Windows
+# -----------------------------------------------------------------------------
+# Define maintenance windows for automated operations
+# Times are in UTC
+
+hyperion_maintenance_windows:
+  dev:
+    day: "*"
+    start_hour: 0
+    end_hour: 24
+  staging:
+    day: "1-5"  # Monday-Friday
+    start_hour: 22
+    end_hour: 6
+  prod:
+    day: "0,6"  # Saturday-Sunday
+    start_hour: 2
+    end_hour: 6
+
+# -----------------------------------------------------------------------------
+# Feature Flags
+# -----------------------------------------------------------------------------
+# Enable/disable features across the fleet
+
+hyperion_features:
+  auto_patching: "{{ hyperion_environment != 'prod' }}"
+  config_drift_detection: true
+  performance_monitoring: true
+  security_scanning: true
+  backup_enabled: true
+  log_forwarding: true
+
+# -----------------------------------------------------------------------------
+# Security Settings
+# -----------------------------------------------------------------------------
+# Global security configuration
+
+hyperion_security:
+  # Require encrypted connections
+  require_https: true
+
+  # Minimum TLS version
+  min_tls_version: "1.2"
+
+  # Audit logging
+  audit_logging_enabled: true
+
+  # Failed login lockout
+  lockout_threshold: 5
+  lockout_duration_minutes: 30
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+# Centralized logging settings
+
+hyperion_logging:
+  level: "{{ hyperion_env_config[hyperion_environment].log_level | default('info') }}"
+  format: json
+  retention_days: "{{ hyperion_env_config[hyperion_environment].backup_retention_days | default(30) }}"
+  destinations:
+    - local
+    - cloudwatch
+
+# -----------------------------------------------------------------------------
+# Ansible Configuration
+# -----------------------------------------------------------------------------
+# Settings that affect Ansible's behavior
+
+# Gather facts on connection (disable for faster execution if not needed)
+gather_facts_enabled: true
+
+# Fact caching (reduces execution time for repeated runs)
+fact_caching_enabled: true
+fact_caching_timeout: 3600  # 1 hour
+
+# Parallel execution settings
+ansible_forks: 10
+ansible_serial_percentage: 25  # Roll out changes to 25% of hosts at a time
