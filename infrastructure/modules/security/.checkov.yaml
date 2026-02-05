@@ -1,0 +1,33 @@
+# Checkov configuration for security module
+# This configuration ensures compliance with security best practices
+
+framework:
+  - terraform
+
+compact: false
+quiet: false
+
+# Skip specific checks if they are not applicable
+# Uncomment and adjust as needed
+skip-check:
+  # Example: Skip check for public S3 buckets if intentional
+  # - CKV_AWS_18
+
+# Custom output format
+output:
+  - cli
+  - json
+
+# Severity threshold (INFO, LOW, MEDIUM, HIGH, CRITICAL)
+check-severity:
+  soft-fail: MEDIUM
+
+# External checks directory (if custom checks are needed)
+# external-checks-dir:
+#   - ./custom_checks
+
+# Download external modules for scanning
+download-external-modules: true
+
+# Evaluate variables
+evaluate-variables: true

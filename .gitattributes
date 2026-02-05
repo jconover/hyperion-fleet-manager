@@ -1,0 +1,100 @@
+# Set default behavior to automatically normalize line endings
+* text=auto eol=lf
+
+# Source code
+*.c text diff=c
+*.cc text diff=cpp
+*.cxx text diff=cpp
+*.cpp text diff=cpp
+*.c++ text diff=cpp
+*.hpp text diff=cpp
+*.h text diff=c
+*.h++ text diff=cpp
+*.hh text diff=cpp
+
+# Python
+*.py text diff=python
+*.pyi text diff=python
+*.pyx text diff=python
+
+# Go
+*.go text diff=golang
+
+# JavaScript
+*.js text diff=javascript
+*.jsx text diff=javascript
+*.ts text diff=typescript
+*.tsx text diff=typescript
+*.mjs text
+*.cjs text
+
+# Shell scripts
+*.sh text eol=lf
+*.bash text eol=lf
+*.zsh text eol=lf
+
+# Windows scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Serialization
+*.json text
+*.toml text
+*.xml text
+*.yaml text
+*.yml text
+
+# Documentation
+*.md text diff=markdown
+*.txt text
+*.adoc text
+*.textile text
+*.mustache text
+*.csv text
+*.tab text
+*.tsv text
+*.sql text
+
+# Templates
+*.ejs text
+*.hbs text
+*.handlebars text
+*.hbt text
+*.jade text
+*.haml text
+
+# Config files
+.editorconfig text
+.gitattributes text
+.gitconfig text
+.gitignore text
+Makefile text
+makefile text
+Dockerfile text
+docker-compose*.yml text
+
+# Infrastructure as Code
+*.tf text
+*.tfvars text
+*.hcl text
+
+# Graphics
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text
+*.eps binary
+
+# Archives
+*.7z binary
+*.gz binary
+*.tar binary
+*.zip binary
+*.tgz binary
+
+# Executables
+*.exe binary
+*.pyc binary

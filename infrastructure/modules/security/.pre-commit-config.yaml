@@ -1,0 +1,56 @@
+# Pre-commit hooks for security module
+# Install with: pre-commit install
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.86.0
+    hooks:
+      - id: terraform_fmt
+        name: Terraform format
+      - id: terraform_validate
+        name: Terraform validate
+      - id: terraform_docs
+        name: Generate Terraform docs
+        args:
+          - --hook-config=--path-to-file=TERRAFORM.md
+          - --hook-config=--add-to-existing-file=true
+          - --hook-config=--create-file-if-not-exist=true
+      - id: terraform_tflint
+        name: Terraform lint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+      - id: terraform_checkov
+        name: Checkov security scan
+        args:
+          - --args=--config-file=__GIT_WORKING_DIR__/.checkov.yaml
+
+  - repo: https://github.com/terraform-linters/tflint
+    rev: v0.50.0
+    hooks:
+      - id: tflint
+        name: TFLint
+        args:
+          - --config=.tflint.hcl
+
+  - repo: https://github.com/bridgecrewio/checkov
+    rev: 3.1.34
+    hooks:
+      - id: checkov
+        name: Checkov
+        args:
+          - --config-file=.checkov.yaml
+          - --quiet
+          - --compact

@@ -1,0 +1,176 @@
+name: Workflow Validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+
+jobs:
+  validate-yaml:
+    name: Validate YAML Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Validate workflow YAML
+        run: |
+          yamllint -c .github/workflows/.yamllint .github/workflows/*.yml
+          echo "All workflow files are valid YAML"
+
+  actionlint:
+    name: Lint GitHub Actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@v1
+        with:
+          fail_on_error: true
+          filter_mode: nofilter
+          level: error
+
+  check-secrets:
+    name: Check Required Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract required secrets
+        id: secrets
+        run: |
+          echo "Checking for required secrets in workflows..."
+
+          REQUIRED_SECRETS=(
+            "AWS_ROLE_DEV"
+            "AWS_ROLE_STAGING"
+            "AWS_ROLE_PROD"
+            "INFRACOST_API_KEY"
+          )
+
+          echo "Required secrets:"
+          printf '%s\n' "${REQUIRED_SECRETS[@]}"
+
+          # Note: This is informational only - actual secret validation
+          # requires GitHub API access with appropriate permissions
+
+      - name: Generate secrets documentation
+        run: |
+          cat > secrets-requirements.md << 'EOF'
+          # Required Secrets
+
+          The following secrets must be configured in the repository:
+
+          ## AWS Credentials (OIDC)
+          - `AWS_ROLE_DEV`: IAM role ARN for dev environment
+          - `AWS_ROLE_STAGING`: IAM role ARN for staging environment
+          - `AWS_ROLE_PROD`: IAM role ARN for production environment
+
+          ## Third-party Services
+          - `INFRACOST_API_KEY`: API key for Infracost cost estimation
+
+          ## Optional Secrets
+          - `SLACK_WEBHOOK_URL`: Slack webhook for notifications (optional)
+
+          EOF
+
+          cat secrets-requirements.md
+
+  test-composite-actions:
+    name: Test Composite Actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate composite action metadata
+        run: |
+          for action_dir in .github/actions/*/; do
+            if [ -f "${action_dir}action.yml" ]; then
+              echo "Validating ${action_dir}action.yml"
+              # Basic YAML validation
+              python3 -c "import yaml; yaml.safe_load(open('${action_dir}action.yml'))"
+              echo "✓ ${action_dir}action.yml is valid"
+            fi
+          done
+
+  security-check:
+    name: Security Check Workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for hardcoded secrets
+        run: |
+          echo "Checking for potential hardcoded secrets..."
+
+          # Check for common secret patterns
+          if grep -r -E "(password|secret|key|token)\s*[:=]\s*['\"][^'\"]+['\"]" .github/workflows/ --include="*.yml" | grep -v "secrets\." | grep -v "inputs\."; then
+            echo "Warning: Potential hardcoded secrets found"
+            exit 1
+          else
+            echo "✓ No hardcoded secrets detected"
+          fi
+
+      - name: Check for command injection vulnerabilities
+        run: |
+          echo "Checking for command injection patterns..."
+
+          # Look for direct use of github.event in run commands (unsafe)
+          if grep -r '\${{.*github\.event\.' .github/workflows/ --include="*.yml" | grep 'run:' -A 5 | grep -v 'env:'; then
+            echo "Warning: Potential command injection vulnerability detected"
+            echo "Use environment variables instead of direct interpolation"
+            exit 1
+          else
+            echo "✓ No obvious command injection patterns detected"
+          fi
+
+  summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [validate-yaml, actionlint, check-secrets, test-composite-actions, security-check]
+    if: always()
+    steps:
+      - name: Check validation results
+        env:
+          YAML_RESULT: ${{ needs.validate-yaml.result }}
+          LINT_RESULT: ${{ needs.actionlint.result }}
+          SECRETS_RESULT: ${{ needs.check-secrets.result }}
+          ACTIONS_RESULT: ${{ needs.test-composite-actions.result }}
+          SECURITY_RESULT: ${{ needs.security-check.result }}
+        run: |
+          echo "## Workflow Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| YAML Validation | ${YAML_RESULT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Action Lint | ${LINT_RESULT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secrets Check | ${SECRETS_RESULT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Composite Actions | ${ACTIONS_RESULT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Check | ${SECURITY_RESULT} |" >> $GITHUB_STEP_SUMMARY
+
+          # Fail if any check failed
+          if [[ "${YAML_RESULT}" != "success" ]] || \
+             [[ "${LINT_RESULT}" != "success" ]] || \
+             [[ "${SECRETS_RESULT}" != "success" ]] || \
+             [[ "${ACTIONS_RESULT}" != "success" ]] || \
+             [[ "${SECURITY_RESULT}" != "success" ]]; then
+            echo "One or more validation checks failed"
+            exit 1
+          fi
+
+          echo "All validation checks passed!"
