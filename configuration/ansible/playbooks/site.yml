@@ -1,0 +1,115 @@
+---
+# site.yml - Master Playbook for Hyperion Fleet Manager
+#
+# This is the main entry point for running all configuration management tasks
+# across the Windows server fleet. It imports all role-specific playbooks and
+# supports tag-based execution for selective configuration.
+#
+# Usage Examples:
+#   Run everything:
+#     ansible-playbook -i inventories/production site.yml
+#
+#   Run specific tags:
+#     ansible-playbook -i inventories/production site.yml --tags baseline
+#     ansible-playbook -i inventories/production site.yml --tags packages
+#     ansible-playbook -i inventories/production site.yml --tags compliance
+#
+#   Dry run:
+#     ansible-playbook -i inventories/production site.yml --check --diff
+#
+#   Limit to specific hosts:
+#     ansible-playbook -i inventories/production site.yml --limit web_servers
+
+- name: "Hyperion Fleet Manager - Master Configuration Playbook"
+  hosts: localhost
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Display playbook execution banner
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Hyperion Fleet Manager - Configuration Management
+          ============================================================
+          Started: {{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -Iseconds')) }}
+          Inventory: {{ inventory_file | default('Not specified') }}
+          Limit: {{ ansible_limit | default('None') }}
+          Tags: {{ ansible_run_tags | default(['all']) | join(', ') }}
+          ============================================================
+
+    - name: Validate required variables are defined
+      ansible.builtin.assert:
+        that:
+          - hyperion_environment is defined
+        fail_msg: "Required variable 'hyperion_environment' is not defined. Set it in your inventory or as extra var."
+        success_msg: "Environment validated: {{ hyperion_environment }}"
+      when: hyperion_environment is defined
+      ignore_errors: true
+
+# Import baseline configuration playbook
+# Applies: windows_base, chocolatey (common packages), security_hardening
+- name: Import baseline configuration
+  ansible.builtin.import_playbook: baseline.yml
+  tags:
+    - baseline
+    - common
+    - always_baseline
+  when: "'skip_baseline' not in ansible_run_tags"
+
+# Import package deployment playbook
+# Manages Chocolatey packages with rolling updates
+- name: Import package deployment
+  ansible.builtin.import_playbook: deploy_packages.yml
+  tags:
+    - packages
+    - chocolatey
+    - deploy
+  when: "'skip_packages' not in ansible_run_tags"
+
+# Import compliance scanning playbook
+# Runs DSC compliance checks and generates reports
+- name: Import compliance scanning
+  ansible.builtin.import_playbook: compliance_scan.yml
+  tags:
+    - compliance
+    - audit
+    - scan
+  when: "'skip_compliance' not in ansible_run_tags"
+
+# Import patch management playbook
+# Handles Windows Update operations with rolling updates
+- name: Import patch management
+  ansible.builtin.import_playbook: patch_management.yml
+  tags:
+    - patching
+    - updates
+    - maintenance
+  when: "'skip_patching' not in ansible_run_tags"
+
+# Import fleet health check playbook
+# Collects health status and generates reports
+- name: Import fleet health check
+  ansible.builtin.import_playbook: fleet_health_check.yml
+  tags:
+    - health
+    - monitoring
+    - status
+  when: "'skip_health' not in ansible_run_tags"
+
+# Summary play - runs after all imports
+- name: "Hyperion Fleet Manager - Execution Summary"
+  hosts: localhost
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Display execution summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Hyperion Fleet Manager - Execution Complete
+          ============================================================
+          Finished: {{ lookup('pipe', 'date -Iseconds') }}
+          ============================================================
+          Review logs for detailed results.
+          Report location: /var/log/ansible/hyperion-fleet-manager.log
+          ============================================================

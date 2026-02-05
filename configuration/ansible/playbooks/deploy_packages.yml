@@ -1,0 +1,330 @@
+---
+# deploy_packages.yml - Deploy and Update Chocolatey Packages
+#
+# This playbook manages Chocolatey package deployment across the Windows fleet
+# with support for rolling updates to minimize service disruption.
+#
+# Usage:
+#   # Deploy default packages to all hosts:
+#   ansible-playbook -i inventories/production playbooks/deploy_packages.yml
+#
+#   # Deploy specific packages via extra vars:
+#   ansible-playbook -i inventories/production playbooks/deploy_packages.yml \
+#     -e '{"deploy_packages": [{"name": "firefox", "state": "present"}]}'
+#
+#   # Update all packages:
+#   ansible-playbook -i inventories/production playbooks/deploy_packages.yml \
+#     -e "package_action=upgrade"
+#
+#   # Target specific hosts:
+#   ansible-playbook -i inventories/production playbooks/deploy_packages.yml \
+#     --limit web_servers
+#
+#   # Dry run:
+#   ansible-playbook -i inventories/production playbooks/deploy_packages.yml --check
+
+- name: "Deploy and Update Chocolatey Packages"
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  become: true
+  become_method: runas
+  become_user: Administrator
+
+  # Rolling update configuration - 20% of hosts at a time
+  serial: "{{ deploy_serial | default('20%') }}"
+  max_fail_percentage: "{{ deploy_max_fail_percentage | default(10) }}"
+
+  vars:
+    # Default packages to deploy if none specified via extra vars
+    default_deploy_packages:
+      - name: 7zip
+        state: present
+      - name: notepadplusplus
+        state: present
+      - name: git
+        state: present
+
+    # Package action: present, absent, latest, upgrade
+    package_action: present
+
+    # Chocolatey source configuration
+    chocolatey_source: "{{ choco_source | default('https://community.chocolatey.org/api/v2/') }}"
+
+    # Timeout for package operations (seconds)
+    package_timeout: 3600
+
+    # Retry configuration
+    package_retries: 3
+    package_retry_delay: 30
+
+  tags:
+    - packages
+    - chocolatey
+    - deploy
+
+  pre_tasks:
+    - name: Validate Windows target
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Windows"
+        fail_msg: "This playbook only supports Windows hosts"
+      tags: always
+
+    - name: Set packages to deploy
+      ansible.builtin.set_fact:
+        packages_to_deploy: "{{ deploy_packages | default(default_deploy_packages) }}"
+      tags: always
+
+    - name: Display deployment parameters
+      ansible.builtin.debug:
+        msg: |
+          Package Deployment Parameters:
+          - Target Hosts: {{ target_hosts | default('all') }}
+          - Serial: {{ deploy_serial | default('20%') }}
+          - Max Fail %: {{ deploy_max_fail_percentage | default(10) }}
+          - Packages to Deploy: {{ packages_to_deploy | length }}
+          - Package Action: {{ package_action }}
+          - Chocolatey Source: {{ chocolatey_source }}
+      tags: always
+
+    - name: Create deployment log directory
+      ansible.windows.win_file:
+        path: C:\Hyperion\Logs\PackageDeployment
+        state: directory
+      tags: always
+
+    - name: Record deployment start
+      ansible.windows.win_copy:
+        content: |
+          {
+            "deployment_start": "{{ ansible_date_time.iso8601 }}",
+            "host": "{{ inventory_hostname }}",
+            "packages_count": {{ packages_to_deploy | length }},
+            "action": "{{ package_action }}"
+          }
+        dest: "C:\\Hyperion\\Logs\\PackageDeployment\\deploy_{{ ansible_date_time.epoch }}.json"
+      tags: always
+
+  tasks:
+    # =========================================================================
+    # Pre-deployment Validation
+    # =========================================================================
+    - name: Pre-deployment validation
+      tags:
+        - validation
+        - pre_deploy
+      block:
+        - name: Check Chocolatey is installed
+          ansible.windows.win_shell: |
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+              $version = choco --version
+              Write-Output "Chocolatey version: $version"
+              exit 0
+            } else {
+              Write-Output "Chocolatey not installed"
+              exit 1
+            }
+          register: choco_check
+          failed_when: choco_check.rc != 0
+
+        - name: Install Chocolatey if not present
+          ansible.windows.win_shell: |
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          when: choco_check.rc != 0
+          register: choco_install
+
+        - name: Get currently installed packages
+          ansible.windows.win_shell: |
+            choco list --local-only --limit-output | ConvertTo-Json
+          register: installed_packages
+          changed_when: false
+
+        - name: Display currently installed packages count
+          ansible.builtin.debug:
+            msg: "Currently installed packages: {{ (installed_packages.stdout | from_json | default([])) | length }}"
+
+    # =========================================================================
+    # Chocolatey Configuration
+    # =========================================================================
+    - name: Configure Chocolatey settings
+      tags:
+        - configure
+        - choco_config
+      block:
+        - name: Configure Chocolatey features
+          ansible.windows.win_shell: |
+            choco feature enable -n=allowGlobalConfirmation
+            choco feature enable -n=useRememberedArgumentsForUpgrades
+            choco feature disable -n=showDownloadProgress
+            choco feature enable -n=failOnAutoUninstaller
+          changed_when: false
+
+        - name: Configure custom Chocolatey source if specified
+          ansible.windows.win_shell: |
+            $sourceName = "hyperion-internal"
+            $sourceUrl = "{{ chocolatey_internal_source }}"
+            $existingSource = choco source list | Where-Object { $_ -match $sourceName }
+            if (-not $existingSource) {
+              choco source add -n=$sourceName -s=$sourceUrl --priority=1
+              Write-Output "Source added"
+            } else {
+              Write-Output "Source already exists"
+            }
+          when: chocolatey_internal_source is defined
+          register: source_result
+          changed_when: "'Source added' in source_result.stdout"
+
+    # =========================================================================
+    # Package Deployment
+    # =========================================================================
+    - name: Deploy packages
+      tags:
+        - deploy
+        - install
+      block:
+        - name: Install or update Chocolatey packages
+          chocolatey.chocolatey.win_chocolatey:
+            name: "{{ item.name }}"
+            state: "{{ item.state | default(package_action) }}"
+            version: "{{ item.version | default(omit) }}"
+            source: "{{ item.source | default(omit) }}"
+            install_args: "{{ item.install_args | default(omit) }}"
+            package_params: "{{ item.package_params | default(omit) }}"
+            allow_empty_checksums: "{{ item.allow_empty_checksums | default(false) }}"
+            allow_prerelease: "{{ item.allow_prerelease | default(false) }}"
+            ignore_checksums: "{{ item.ignore_checksums | default(false) }}"
+            timeout: "{{ package_timeout }}"
+          loop: "{{ packages_to_deploy }}"
+          loop_control:
+            label: "{{ item.name }} ({{ item.state | default(package_action) }})"
+          register: package_results
+          retries: "{{ package_retries }}"
+          delay: "{{ package_retry_delay }}"
+          until: package_results is succeeded
+
+        - name: Collect package deployment results
+          ansible.builtin.set_fact:
+            deployment_summary:
+              total: "{{ packages_to_deploy | length }}"
+              changed: "{{ package_results.results | selectattr('changed', 'equalto', true) | list | length }}"
+              failed: "{{ package_results.results | selectattr('failed', 'defined') | selectattr('failed', 'equalto', true) | list | length }}"
+
+    # =========================================================================
+    # Upgrade All Packages (Optional)
+    # =========================================================================
+    - name: Upgrade all packages
+      when: package_action == "upgrade" or upgrade_all | default(false)
+      tags:
+        - upgrade
+        - update_all
+      block:
+        - name: Upgrade all outdated Chocolatey packages
+          ansible.windows.win_shell: |
+            $result = choco upgrade all -y --limit-output 2>&1
+            $exitCode = $LASTEXITCODE
+            Write-Output $result
+            exit $exitCode
+          register: upgrade_result
+          changed_when: "'upgraded' in upgrade_result.stdout.lower()"
+          failed_when: upgrade_result.rc != 0 and upgrade_result.rc != 1641 and upgrade_result.rc != 3010
+          # rc 1641 and 3010 indicate reboot required
+
+        - name: Check if reboot is required after upgrade
+          ansible.builtin.set_fact:
+            reboot_required: "{{ upgrade_result.rc in [1641, 3010] }}"
+
+    # =========================================================================
+    # Package Removal (if specified)
+    # =========================================================================
+    - name: Remove packages
+      when: packages_to_remove is defined and packages_to_remove | length > 0
+      tags:
+        - remove
+        - uninstall
+      block:
+        - name: Remove specified Chocolatey packages
+          chocolatey.chocolatey.win_chocolatey:
+            name: "{{ item }}"
+            state: absent
+          loop: "{{ packages_to_remove }}"
+          register: removal_results
+
+    # =========================================================================
+    # Post-deployment Validation
+    # =========================================================================
+    - name: Post-deployment validation
+      tags:
+        - validation
+        - post_deploy
+      block:
+        - name: Verify installed packages
+          ansible.windows.win_shell: |
+            $packages = @({{ packages_to_deploy | map(attribute='name') | map('regex_replace', '^(.*)$', '"\1"') | join(',') }})
+            $results = @()
+            foreach ($pkg in $packages) {
+              $installed = choco list --local-only --limit-output | Where-Object { $_ -match "^$pkg\|" }
+              $results += @{
+                Package = $pkg
+                Installed = [bool]$installed
+                Version = if ($installed) { ($installed -split '\|')[1] } else { $null }
+              }
+            }
+            $results | ConvertTo-Json
+          register: verification_result
+          changed_when: false
+
+        - name: Display package verification results
+          ansible.builtin.debug:
+            msg: "{{ verification_result.stdout | from_json }}"
+
+        - name: Update PATH environment
+          ansible.windows.win_shell: |
+            # Refresh environment variables
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+            refreshenv 2>$null
+          changed_when: false
+
+  post_tasks:
+    - name: Record deployment completion
+      ansible.windows.win_copy:
+        content: |
+          {
+            "deployment_complete": "{{ lookup('pipe', 'date -Iseconds') }}",
+            "host": "{{ inventory_hostname }}",
+            "summary": {
+              "total_packages": {{ packages_to_deploy | length }},
+              "changed": {{ deployment_summary.changed | default(0) }},
+              "failed": {{ deployment_summary.failed | default(0) }}
+            },
+            "packages": {{ packages_to_deploy | to_json }},
+            "reboot_required": {{ reboot_required | default(false) | lower }}
+          }
+        dest: "C:\\Hyperion\\Logs\\PackageDeployment\\deploy_complete_{{ ansible_date_time.epoch }}.json"
+      tags: always
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: |
+          Package Deployment Complete for {{ inventory_hostname }}
+          - Total Packages: {{ packages_to_deploy | length }}
+          - Changed: {{ deployment_summary.changed | default(0) }}
+          - Failed: {{ deployment_summary.failed | default(0) }}
+          - Reboot Required: {{ reboot_required | default(false) }}
+      tags: always
+
+    - name: Handle reboot if required and allowed
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+        post_reboot_delay: 60
+        msg: "Rebooting after package deployment"
+      when:
+        - reboot_required | default(false)
+        - hyperion_allow_reboot | default(false)
+      tags: reboot
+
+  handlers:
+    - name: Refresh environment
+      ansible.windows.win_shell: refreshenv
+      listen: "packages installed"

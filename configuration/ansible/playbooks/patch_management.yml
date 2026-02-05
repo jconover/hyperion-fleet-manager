@@ -1,0 +1,556 @@
+---
+# patch_management.yml - Windows Update Patch Management
+#
+# This playbook manages Windows Update operations across the fleet with:
+# - Pre-patch health checks
+# - Category-based update filtering
+# - Rolling updates with configurable batch sizes
+# - Controlled reboot handling
+# - Post-patch validation
+#
+# Usage:
+#   # Run patch management on all hosts (20% at a time):
+#   ansible-playbook -i inventories/production playbooks/patch_management.yml
+#
+#   # Run on specific hosts:
+#   ansible-playbook -i inventories/production playbooks/patch_management.yml \
+#     --limit web_servers
+#
+#   # Only security updates:
+#   ansible-playbook -i inventories/production playbooks/patch_management.yml \
+#     -e "patch_categories=['SecurityUpdates']"
+#
+#   # Dry run (check only):
+#   ansible-playbook -i inventories/production playbooks/patch_management.yml \
+#     -e "patch_check_only=true"
+#
+#   # With automatic reboot:
+#   ansible-playbook -i inventories/production playbooks/patch_management.yml \
+#     -e "patch_allow_reboot=true"
+
+- name: "Windows Update Patch Management"
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  become: true
+  become_method: runas
+  become_user: Administrator
+
+  # Rolling updates - process hosts in batches
+  serial: "{{ patch_serial | default('20%') }}"
+  max_fail_percentage: "{{ patch_max_fail_percentage | default(10) }}"
+
+  vars:
+    # Patch categories to install
+    # Options: SecurityUpdates, CriticalUpdates, UpdateRollups, Updates, DefinitionUpdates, Drivers, FeaturePacks, ServicePacks
+    patch_categories:
+      - SecurityUpdates
+      - CriticalUpdates
+      - UpdateRollups
+
+    # Patch management settings
+    patch_check_only: false
+    patch_allow_reboot: false
+    patch_reboot_timeout: 1800
+    patch_post_reboot_delay: 120
+    patch_connection_timeout: 300
+
+    # Health check thresholds
+    min_disk_space_gb: 10
+    max_memory_usage_percent: 90
+    critical_services:
+      - wuauserv
+      - WinRM
+      - EventLog
+
+    # Logging
+    patch_log_dir: C:\Hyperion\Logs\PatchManagement
+    patch_report_dir: C:\Hyperion\Reports\Patching
+
+  tags:
+    - patching
+    - updates
+    - maintenance
+
+  pre_tasks:
+    - name: Validate Windows target
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Windows"
+        fail_msg: "This playbook only supports Windows hosts"
+      tags: always
+
+    - name: Display patch management parameters
+      ansible.builtin.debug:
+        msg: |
+          Patch Management Parameters:
+          - Target Hosts: {{ target_hosts | default('all') }}
+          - Serial: {{ patch_serial | default('20%') }}
+          - Categories: {{ patch_categories | join(', ') }}
+          - Check Only: {{ patch_check_only }}
+          - Allow Reboot: {{ patch_allow_reboot }}
+          - Reboot Timeout: {{ patch_reboot_timeout }}s
+      tags: always
+
+    - name: Create patch management directories
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ patch_log_dir }}"
+        - "{{ patch_report_dir }}"
+      tags: always
+
+    - name: Record patch session start
+      ansible.windows.win_copy:
+        content: |
+          {
+            "session_start": "{{ ansible_date_time.iso8601 }}",
+            "hostname": "{{ inventory_hostname }}",
+            "categories": {{ patch_categories | to_json }},
+            "check_only": {{ patch_check_only | lower }},
+            "allow_reboot": {{ patch_allow_reboot | lower }}
+          }
+        dest: "{{ patch_log_dir }}\\patch_session_{{ ansible_date_time.epoch }}.json"
+      tags: always
+
+  tasks:
+    # =========================================================================
+    # Pre-Patch Health Check
+    # =========================================================================
+    - name: Pre-patch health check
+      tags:
+        - health_check
+        - pre_patch
+      block:
+        - name: Check available disk space
+          ansible.windows.win_shell: |
+            $systemDrive = $env:SystemDrive
+            $disk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='$systemDrive'"
+            $freeSpaceGB = [math]::Round($disk.FreeSpace / 1GB, 2)
+
+            $result = @{
+              Drive = $systemDrive
+              FreeSpaceGB = $freeSpaceGB
+              MinRequiredGB = {{ min_disk_space_gb }}
+              Sufficient = $freeSpaceGB -ge {{ min_disk_space_gb }}
+            }
+
+            $result | ConvertTo-Json
+            if (-not $result.Sufficient) { exit 1 }
+          register: disk_check
+          failed_when: false
+
+        - name: Validate disk space
+          ansible.builtin.assert:
+            that:
+              - disk_check.rc == 0
+            fail_msg: |
+              Insufficient disk space on {{ inventory_hostname }}.
+              Available: {{ (disk_check.stdout | from_json).FreeSpaceGB }}GB
+              Required: {{ min_disk_space_gb }}GB
+            success_msg: "Disk space check passed"
+
+        - name: Check memory usage
+          ansible.windows.win_shell: |
+            $os = Get-WmiObject Win32_OperatingSystem
+            $memoryUsagePercent = [math]::Round((($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100, 2)
+
+            $result = @{
+              TotalMemoryGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+              FreeMemoryGB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+              UsagePercent = $memoryUsagePercent
+              MaxAllowed = {{ max_memory_usage_percent }}
+              Acceptable = $memoryUsagePercent -lt {{ max_memory_usage_percent }}
+            }
+
+            $result | ConvertTo-Json
+            if (-not $result.Acceptable) { exit 1 }
+          register: memory_check
+          failed_when: false
+
+        - name: Validate memory usage
+          ansible.builtin.assert:
+            that:
+              - memory_check.rc == 0
+            fail_msg: |
+              High memory usage on {{ inventory_hostname }}.
+              Current: {{ (memory_check.stdout | from_json).UsagePercent }}%
+              Max Allowed: {{ max_memory_usage_percent }}%
+            success_msg: "Memory usage check passed"
+          when: fail_on_high_memory | default(false)
+
+        - name: Check critical services
+          ansible.windows.win_shell: |
+            $criticalServices = @({{ critical_services | map('regex_replace', '^(.*)$', '"\1"') | join(',') }})
+            $results = @()
+            $allRunning = $true
+
+            foreach ($svc in $criticalServices) {
+              $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+              $status = @{
+                Name = $svc
+                Status = if ($service) { $service.Status.ToString() } else { "NotFound" }
+                Running = if ($service) { $service.Status -eq "Running" } else { $false }
+              }
+              $results += $status
+              if (-not $status.Running) { $allRunning = $false }
+            }
+
+            @{
+              Services = $results
+              AllRunning = $allRunning
+            } | ConvertTo-Json -Depth 3
+          register: services_check
+          changed_when: false
+
+        - name: Validate critical services
+          ansible.builtin.assert:
+            that:
+              - (services_check.stdout | from_json).AllRunning
+            fail_msg: "Not all critical services are running on {{ inventory_hostname }}"
+            success_msg: "All critical services are running"
+
+        - name: Check pending reboots
+          ansible.windows.win_shell: |
+            $rebootPending = $false
+            $reasons = @()
+
+            # Check Windows Update
+            $wuReboot = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+            if ($wuReboot) { $rebootPending = $true; $reasons += "Windows Update" }
+
+            # Check Component Based Servicing
+            $cbsReboot = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+            if ($cbsReboot) { $rebootPending = $true; $reasons += "Component Based Servicing" }
+
+            # Check pending file rename operations
+            $pendingFileRename = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+            if ($pendingFileRename) { $rebootPending = $true; $reasons += "Pending File Rename" }
+
+            @{
+              RebootPending = $rebootPending
+              Reasons = $reasons
+            } | ConvertTo-Json
+          register: reboot_check
+          changed_when: false
+
+        - name: Display pre-existing reboot status
+          ansible.builtin.debug:
+            msg: "Pending reboot detected: {{ (reboot_check.stdout | from_json).Reasons | join(', ') }}"
+          when: (reboot_check.stdout | from_json).RebootPending
+
+        - name: Handle pending reboot before patching
+          ansible.windows.win_reboot:
+            reboot_timeout: "{{ patch_reboot_timeout }}"
+            post_reboot_delay: "{{ patch_post_reboot_delay }}"
+            msg: "Ansible: Rebooting to clear pending operations before patching"
+          when:
+            - (reboot_check.stdout | from_json).RebootPending
+            - patch_allow_reboot
+            - clear_pending_reboot | default(false)
+
+    # =========================================================================
+    # Check for Available Updates
+    # =========================================================================
+    - name: Check for available updates
+      tags:
+        - check_updates
+        - scan
+      block:
+        - name: Scan for available Windows updates
+          ansible.windows.win_shell: |
+            # Create update session
+            $updateSession = New-Object -ComObject Microsoft.Update.Session
+            $updateSearcher = $updateSession.CreateUpdateSearcher()
+
+            # Build search query for specified categories
+            $categoryFilter = @({{ patch_categories | map('regex_replace', '^(.*)$', '"\1"') | join(',') }})
+            $searchQuery = "IsInstalled=0 AND IsHidden=0"
+
+            # Search for updates
+            Write-Host "Searching for updates..."
+            $searchResult = $updateSearcher.Search($searchQuery)
+
+            $updates = @()
+            foreach ($update in $searchResult.Updates) {
+              # Check if update matches our categories
+              $categoryMatch = $false
+              foreach ($category in $update.Categories) {
+                if ($categoryFilter -contains $category.Name -or $categoryFilter.Count -eq 0) {
+                  $categoryMatch = $true
+                  break
+                }
+              }
+
+              if ($categoryMatch -or $categoryFilter.Count -eq 0) {
+                $updates += @{
+                  Title = $update.Title
+                  KBArticleIDs = @($update.KBArticleIDs)
+                  Categories = @($update.Categories | ForEach-Object { $_.Name })
+                  IsMandatory = $update.IsMandatory
+                  RebootRequired = $update.RebootRequired
+                  MaxDownloadSize = [math]::Round($update.MaxDownloadSize / 1MB, 2)
+                  Severity = $update.MsrcSeverity
+                }
+              }
+            }
+
+            @{
+              Timestamp = (Get-Date -Format "o")
+              TotalFound = $searchResult.Updates.Count
+              MatchingCategories = $updates.Count
+              Updates = $updates
+              CategoriesSearched = $categoryFilter
+            } | ConvertTo-Json -Depth 5
+          register: update_scan
+          changed_when: false
+
+        - name: Parse update scan results
+          ansible.builtin.set_fact:
+            available_updates: "{{ update_scan.stdout | from_json }}"
+
+        - name: Display available updates
+          ansible.builtin.debug:
+            msg: |
+              Available Updates for {{ inventory_hostname }}:
+              - Total Found: {{ available_updates.TotalFound }}
+              - Matching Categories: {{ available_updates.MatchingCategories }}
+              - Updates:
+              {% for update in available_updates.Updates[:10] %}
+                - {{ update.Title }} ({{ update.KBArticleIDs | join(', ') }})
+              {% endfor %}
+              {% if available_updates.Updates | length > 10 %}
+                ... and {{ available_updates.Updates | length - 10 }} more
+              {% endif %}
+
+        - name: Save update scan report
+          ansible.windows.win_copy:
+            content: "{{ available_updates | to_nice_json }}"
+            dest: "{{ patch_report_dir }}\\update_scan_{{ ansible_date_time.date }}.json"
+
+    # =========================================================================
+    # Install Windows Updates
+    # =========================================================================
+    - name: Install Windows updates
+      when:
+        - available_updates.MatchingCategories > 0
+        - not patch_check_only
+      tags:
+        - install_updates
+        - patch
+      block:
+        - name: Display installation notice
+          ansible.builtin.debug:
+            msg: "Installing {{ available_updates.MatchingCategories }} updates on {{ inventory_hostname }}"
+
+        - name: Install updates using win_updates module
+          ansible.windows.win_updates:
+            category_names: "{{ patch_categories }}"
+            state: installed
+            reboot: "{{ patch_allow_reboot }}"
+            reboot_timeout: "{{ patch_reboot_timeout }}"
+          register: update_result
+
+        - name: Display update installation results
+          ansible.builtin.debug:
+            msg: |
+              Update Installation Results:
+              - Installed: {{ update_result.installed_update_count | default(0) }}
+              - Found: {{ update_result.found_update_count | default(0) }}
+              - Reboot Required: {{ update_result.reboot_required | default(false) }}
+              - Rebooted: {{ update_result.rebooted | default(false) }}
+
+        - name: Save installation results
+          ansible.windows.win_copy:
+            content: |
+              {
+                "timestamp": "{{ lookup('pipe', 'date -Iseconds') }}",
+                "hostname": "{{ inventory_hostname }}",
+                "installed_count": {{ update_result.installed_update_count | default(0) }},
+                "found_count": {{ update_result.found_update_count | default(0) }},
+                "reboot_required": {{ update_result.reboot_required | default(false) | lower }},
+                "rebooted": {{ update_result.rebooted | default(false) | lower }},
+                "updates": {{ update_result.updates | default({}) | to_json }}
+              }
+            dest: "{{ patch_report_dir }}\\installation_results_{{ ansible_date_time.date }}.json"
+
+    # =========================================================================
+    # Handle Reboot if Required
+    # =========================================================================
+    - name: Handle post-update reboot
+      when:
+        - update_result is defined
+        - update_result.reboot_required | default(false)
+        - patch_allow_reboot
+        - not (update_result.rebooted | default(false))
+      tags:
+        - reboot
+        - post_patch
+      block:
+        - name: Notify before reboot
+          ansible.builtin.debug:
+            msg: "Rebooting {{ inventory_hostname }} to complete update installation"
+
+        - name: Reboot the system
+          ansible.windows.win_reboot:
+            reboot_timeout: "{{ patch_reboot_timeout }}"
+            post_reboot_delay: "{{ patch_post_reboot_delay }}"
+            connect_timeout: "{{ patch_connection_timeout }}"
+            msg: "Ansible: Rebooting to complete Windows Update installation"
+          register: reboot_result
+
+        - name: Wait for WinRM to be available
+          ansible.builtin.wait_for_connection:
+            connect_timeout: "{{ patch_connection_timeout }}"
+            delay: 30
+            timeout: "{{ patch_reboot_timeout }}"
+
+    # =========================================================================
+    # Post-Patch Validation
+    # =========================================================================
+    - name: Post-patch validation
+      tags:
+        - validation
+        - post_patch
+      block:
+        - name: Verify critical services after patching
+          ansible.windows.win_shell: |
+            $criticalServices = @({{ critical_services | map('regex_replace', '^(.*)$', '"\1"') | join(',') }})
+            $results = @()
+            $allHealthy = $true
+
+            foreach ($svc in $criticalServices) {
+              $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+              $status = @{
+                Name = $svc
+                Status = if ($service) { $service.Status.ToString() } else { "NotFound" }
+                Healthy = if ($service) { $service.Status -eq "Running" } else { $false }
+              }
+              $results += $status
+
+              if (-not $status.Healthy) {
+                $allHealthy = $false
+                # Attempt to start the service
+                if ($service) {
+                  try {
+                    Start-Service $svc -ErrorAction Stop
+                    $status.Status = "Started"
+                    $status.Healthy = $true
+                    $status.Recovered = $true
+                  } catch {
+                    $status.Error = $_.Exception.Message
+                  }
+                }
+              }
+            }
+
+            @{
+              Services = $results
+              AllHealthy = $allHealthy
+            } | ConvertTo-Json -Depth 3
+          register: post_patch_services
+          changed_when: false
+
+        - name: Display post-patch service status
+          ansible.builtin.debug:
+            msg: "Post-patch services status: {{ post_patch_services.stdout | from_json }}"
+
+        - name: Verify no pending reboot issues
+          ansible.windows.win_shell: |
+            $issues = @()
+
+            # Check for failed updates
+            $updateSession = New-Object -ComObject Microsoft.Update.Session
+            $updateSearcher = $updateSession.CreateUpdateSearcher()
+            $history = $updateSearcher.QueryHistory(0, 20)
+
+            $recentFailures = $history | Where-Object {
+              $_.Date -gt (Get-Date).AddHours(-1) -and
+              $_.ResultCode -ne 2  # 2 = Succeeded
+            }
+
+            if ($recentFailures) {
+              foreach ($failure in $recentFailures) {
+                $issues += @{
+                  Title = $failure.Title
+                  Date = $failure.Date.ToString("o")
+                  ResultCode = $failure.ResultCode
+                }
+              }
+            }
+
+            @{
+              RecentFailures = $issues
+              HasIssues = $issues.Count -gt 0
+            } | ConvertTo-Json -Depth 3
+          register: post_patch_issues
+          changed_when: false
+
+        - name: Display post-patch validation results
+          ansible.builtin.debug:
+            msg: "Post-patch validation: {{ 'Issues detected' if (post_patch_issues.stdout | from_json).HasIssues else 'All clear' }}"
+
+        - name: Run quick connectivity test
+          ansible.windows.win_ping:
+          register: connectivity_test
+
+        - name: Verify WinRM is operational
+          ansible.builtin.assert:
+            that:
+              - connectivity_test.ping == "pong"
+            fail_msg: "WinRM connectivity issue detected after patching"
+            success_msg: "WinRM connectivity verified after patching"
+
+  post_tasks:
+    - name: Generate patch session report
+      ansible.windows.win_copy:
+        content: |
+          {
+            "session_complete": "{{ lookup('pipe', 'date -Iseconds') }}",
+            "hostname": "{{ inventory_hostname }}",
+            "environment": "{{ hyperion_environment | default('unknown') }}",
+            "summary": {
+              "updates_available": {{ available_updates.MatchingCategories }},
+              "updates_installed": {{ update_result.installed_update_count | default(0) }},
+              "reboot_required": {{ update_result.reboot_required | default(false) | lower }},
+              "rebooted": {{ update_result.rebooted | default(false) | lower }},
+              "check_only": {{ patch_check_only | lower }},
+              "post_patch_healthy": {{ (post_patch_services.stdout | from_json).AllHealthy | lower }}
+            },
+            "categories": {{ patch_categories | to_json }},
+            "updates_detail": {{ update_result.updates | default({}) | to_json }}
+          }
+        dest: "{{ patch_report_dir }}\\session_report_{{ ansible_date_time.epoch }}.json"
+      tags: always
+
+    - name: Display patch management summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Patch Management Complete - {{ inventory_hostname }}
+          ============================================================
+          Updates Available: {{ available_updates.MatchingCategories }}
+          Updates Installed: {{ update_result.installed_update_count | default(0) }}
+          Reboot Required: {{ update_result.reboot_required | default(false) }}
+          Reboot Performed: {{ update_result.rebooted | default(false) }}
+          Post-Patch Health: {{ 'Healthy' if (post_patch_services.stdout | from_json).AllHealthy else 'Issues Detected' }}
+          Report Location: {{ patch_report_dir }}\session_report_{{ ansible_date_time.epoch }}.json
+          ============================================================
+      tags: always
+
+    - name: Notify if reboot still required
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Reboot is required on {{ inventory_hostname }} but was not performed.
+          Set patch_allow_reboot=true to enable automatic reboots.
+      when:
+        - update_result is defined
+        - update_result.reboot_required | default(false)
+        - not patch_allow_reboot
+      tags: always
+
+  handlers:
+    - name: Restart Windows Update service
+      ansible.windows.win_service:
+        name: wuauserv
+        state: restarted

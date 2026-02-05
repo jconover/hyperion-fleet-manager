@@ -1,0 +1,756 @@
+---
+# fleet_health_check.yml - Fleet Health Status Collection
+#
+# This playbook collects comprehensive health information from all Windows hosts:
+# - System facts and specifications
+# - Service status for critical services
+# - Disk space utilization
+# - Memory usage
+# - CPU utilization
+# - Network connectivity
+# - Windows Update status
+#
+# Generates JSON health reports for monitoring and alerting integration.
+#
+# Usage:
+#   # Run health check on all hosts:
+#   ansible-playbook -i inventories/production playbooks/fleet_health_check.yml
+#
+#   # Run on specific hosts:
+#   ansible-playbook -i inventories/production playbooks/fleet_health_check.yml \
+#     --limit web_servers
+#
+#   # Quick check (reduced metrics):
+#   ansible-playbook -i inventories/production playbooks/fleet_health_check.yml \
+#     --tags quick_check
+#
+#   # Upload to S3:
+#   ansible-playbook -i inventories/production playbooks/fleet_health_check.yml \
+#     -e "health_upload_s3=true"
+
+- name: "Fleet Health Status Collection"
+  hosts: all
+  gather_facts: true
+  become: true
+  become_method: runas
+  become_user: Administrator
+
+  vars:
+    # Health check configuration
+    health_report_dir: C:\Hyperion\Reports\Health
+    health_log_dir: C:\Hyperion\Logs\Health
+
+    # S3 upload settings
+    health_upload_s3: false
+    health_s3_bucket: "{{ hyperion_health_bucket | default('hyperion-health-reports') }}"
+    health_s3_prefix: "{{ hyperion_environment | default('unknown') }}/health"
+
+    # Thresholds for health status
+    disk_warning_threshold: 20
+    disk_critical_threshold: 10
+    memory_warning_threshold: 80
+    memory_critical_threshold: 90
+    cpu_warning_threshold: 80
+    cpu_critical_threshold: 90
+
+    # Services to monitor
+    monitored_services:
+      - name: wuauserv
+        display_name: "Windows Update"
+        critical: true
+      - name: WinRM
+        display_name: "Windows Remote Management"
+        critical: true
+      - name: EventLog
+        display_name: "Windows Event Log"
+        critical: true
+      - name: LanmanWorkstation
+        display_name: "Workstation"
+        critical: false
+      - name: LanmanServer
+        display_name: "Server"
+        critical: false
+      - name: W32Time
+        display_name: "Windows Time"
+        critical: false
+      - name: BITS
+        display_name: "Background Intelligent Transfer"
+        critical: false
+      - name: Dnscache
+        display_name: "DNS Client"
+        critical: false
+
+  tags:
+    - health
+    - monitoring
+    - status
+
+  pre_tasks:
+    - name: Validate Windows target
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Windows"
+        fail_msg: "This playbook only supports Windows hosts"
+      tags: always
+
+    - name: Record health check start time
+      ansible.builtin.set_fact:
+        health_check_start: "{{ ansible_date_time.iso8601 }}"
+      tags: always
+
+    - name: Create health check directories
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ health_report_dir }}"
+        - "{{ health_log_dir }}"
+      tags: always
+
+  tasks:
+    # =========================================================================
+    # Gather System Facts
+    # =========================================================================
+    - name: Gather system facts
+      tags:
+        - facts
+        - system_info
+        - quick_check
+      block:
+        - name: Collect detailed system information
+          ansible.windows.win_shell: |
+            $systemInfo = @{
+              Timestamp = (Get-Date -Format "o")
+              Hostname = $env:COMPUTERNAME
+              FQDN = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+
+              # Operating System
+              OperatingSystem = @{
+                Caption = (Get-WmiObject Win32_OperatingSystem).Caption
+                Version = (Get-WmiObject Win32_OperatingSystem).Version
+                BuildNumber = (Get-WmiObject Win32_OperatingSystem).BuildNumber
+                Architecture = (Get-WmiObject Win32_OperatingSystem).OSArchitecture
+                InstallDate = (Get-WmiObject Win32_OperatingSystem).ConvertToDateTime((Get-WmiObject Win32_OperatingSystem).InstallDate).ToString("o")
+                LastBootUpTime = (Get-WmiObject Win32_OperatingSystem).ConvertToDateTime((Get-WmiObject Win32_OperatingSystem).LastBootUpTime).ToString("o")
+              }
+
+              # Hardware
+              Hardware = @{
+                Manufacturer = (Get-WmiObject Win32_ComputerSystem).Manufacturer
+                Model = (Get-WmiObject Win32_ComputerSystem).Model
+                ProcessorCount = (Get-WmiObject Win32_ComputerSystem).NumberOfProcessors
+                LogicalProcessors = (Get-WmiObject Win32_ComputerSystem).NumberOfLogicalProcessors
+                TotalPhysicalMemoryGB = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)
+              }
+
+              # Domain
+              Domain = @{
+                Name = (Get-WmiObject Win32_ComputerSystem).Domain
+                DomainRole = switch ((Get-WmiObject Win32_ComputerSystem).DomainRole) {
+                  0 { "Standalone Workstation" }
+                  1 { "Member Workstation" }
+                  2 { "Standalone Server" }
+                  3 { "Member Server" }
+                  4 { "Backup Domain Controller" }
+                  5 { "Primary Domain Controller" }
+                }
+                PartOfDomain = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
+              }
+
+              # Network
+              Network = @{
+                IPAddresses = @((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notmatch "Loopback" }).IPAddress)
+                DNSServers = @((Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses -Unique))
+                DefaultGateway = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
+              }
+
+              # Uptime
+              Uptime = @{
+                Days = ((Get-Date) - (Get-WmiObject Win32_OperatingSystem).ConvertToDateTime((Get-WmiObject Win32_OperatingSystem).LastBootUpTime)).Days
+                Hours = ((Get-Date) - (Get-WmiObject Win32_OperatingSystem).ConvertToDateTime((Get-WmiObject Win32_OperatingSystem).LastBootUpTime)).Hours
+                TotalHours = [math]::Round(((Get-Date) - (Get-WmiObject Win32_OperatingSystem).ConvertToDateTime((Get-WmiObject Win32_OperatingSystem).LastBootUpTime)).TotalHours, 2)
+              }
+            }
+
+            $systemInfo | ConvertTo-Json -Depth 5
+          register: system_info_result
+          changed_when: false
+
+        - name: Parse system information
+          ansible.builtin.set_fact:
+            system_info: "{{ system_info_result.stdout | from_json }}"
+
+    # =========================================================================
+    # Check Service Status
+    # =========================================================================
+    - name: Check service status
+      tags:
+        - services
+        - quick_check
+      block:
+        - name: Get status of monitored services
+          ansible.windows.win_shell: |
+            $monitoredServices = @(
+            {% for svc in monitored_services %}
+              @{
+                Name = "{{ svc.name }}"
+                DisplayName = "{{ svc.display_name }}"
+                Critical = {{ svc.critical | lower }}
+              }{{ ',' if not loop.last else '' }}
+            {% endfor %}
+            )
+
+            $serviceStatus = @{
+              Timestamp = (Get-Date -Format "o")
+              Services = @()
+              Summary = @{
+                Total = 0
+                Running = 0
+                Stopped = 0
+                CriticalIssues = 0
+              }
+            }
+
+            foreach ($svcConfig in $monitoredServices) {
+              $service = Get-Service -Name $svcConfig.Name -ErrorAction SilentlyContinue
+              $status = @{
+                Name = $svcConfig.Name
+                DisplayName = $svcConfig.DisplayName
+                Critical = $svcConfig.Critical
+                Exists = [bool]$service
+                Status = if ($service) { $service.Status.ToString() } else { "NotFound" }
+                StartType = if ($service) { $service.StartType.ToString() } else { "Unknown" }
+                IsHealthy = if ($service) { $service.Status -eq "Running" } else { $false }
+              }
+
+              $serviceStatus.Services += $status
+              $serviceStatus.Summary.Total++
+
+              if ($status.Status -eq "Running") {
+                $serviceStatus.Summary.Running++
+              } else {
+                $serviceStatus.Summary.Stopped++
+                if ($svcConfig.Critical) {
+                  $serviceStatus.Summary.CriticalIssues++
+                }
+              }
+            }
+
+            $serviceStatus | ConvertTo-Json -Depth 4
+          register: service_status_result
+          changed_when: false
+
+        - name: Parse service status
+          ansible.builtin.set_fact:
+            service_status: "{{ service_status_result.stdout | from_json }}"
+
+        - name: Display service health summary
+          ansible.builtin.debug:
+            msg: "Services - Running: {{ service_status.Summary.Running }}/{{ service_status.Summary.Total }}, Critical Issues: {{ service_status.Summary.CriticalIssues }}"
+
+    # =========================================================================
+    # Check Disk Space
+    # =========================================================================
+    - name: Check disk space
+      tags:
+        - disk
+        - storage
+        - quick_check
+      block:
+        - name: Get disk space utilization
+          ansible.windows.win_shell: |
+            $diskStatus = @{
+              Timestamp = (Get-Date -Format "o")
+              Disks = @()
+              Summary = @{
+                TotalDisks = 0
+                HealthyDisks = 0
+                WarningDisks = 0
+                CriticalDisks = 0
+              }
+            }
+
+            $disks = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3"
+
+            foreach ($disk in $disks) {
+              $totalGB = [math]::Round($disk.Size / 1GB, 2)
+              $freeGB = [math]::Round($disk.FreeSpace / 1GB, 2)
+              $usedGB = [math]::Round(($disk.Size - $disk.FreeSpace) / 1GB, 2)
+              $freePercent = [math]::Round(($disk.FreeSpace / $disk.Size) * 100, 2)
+              $usedPercent = [math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 2)
+
+              $status = "Healthy"
+              if ($freePercent -lt {{ disk_critical_threshold }}) {
+                $status = "Critical"
+                $diskStatus.Summary.CriticalDisks++
+              } elseif ($freePercent -lt {{ disk_warning_threshold }}) {
+                $status = "Warning"
+                $diskStatus.Summary.WarningDisks++
+              } else {
+                $diskStatus.Summary.HealthyDisks++
+              }
+
+              $diskStatus.Disks += @{
+                DeviceID = $disk.DeviceID
+                VolumeName = $disk.VolumeName
+                FileSystem = $disk.FileSystem
+                TotalGB = $totalGB
+                UsedGB = $usedGB
+                FreeGB = $freeGB
+                UsedPercent = $usedPercent
+                FreePercent = $freePercent
+                Status = $status
+              }
+
+              $diskStatus.Summary.TotalDisks++
+            }
+
+            $diskStatus | ConvertTo-Json -Depth 4
+          register: disk_status_result
+          changed_when: false
+
+        - name: Parse disk status
+          ansible.builtin.set_fact:
+            disk_status: "{{ disk_status_result.stdout | from_json }}"
+
+        - name: Display disk health summary
+          ansible.builtin.debug:
+            msg: |
+              Disk Health:
+              {% for disk in disk_status.Disks %}
+              - {{ disk.DeviceID }}: {{ disk.FreeGB }}GB free ({{ disk.FreePercent }}%) - {{ disk.Status }}
+              {% endfor %}
+
+    # =========================================================================
+    # Check Memory Usage
+    # =========================================================================
+    - name: Check memory usage
+      tags:
+        - memory
+        - quick_check
+      block:
+        - name: Get memory utilization
+          ansible.windows.win_shell: |
+            $os = Get-WmiObject Win32_OperatingSystem
+            $totalMemoryGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+            $freeMemoryGB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+            $usedMemoryGB = [math]::Round(($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB, 2)
+            $usedPercent = [math]::Round((($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100, 2)
+
+            $status = "Healthy"
+            if ($usedPercent -ge {{ memory_critical_threshold }}) {
+              $status = "Critical"
+            } elseif ($usedPercent -ge {{ memory_warning_threshold }}) {
+              $status = "Warning"
+            }
+
+            # Get top memory consumers
+            $topProcesses = Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 5 | ForEach-Object {
+              @{
+                Name = $_.ProcessName
+                PID = $_.Id
+                MemoryMB = [math]::Round($_.WorkingSet64 / 1MB, 2)
+              }
+            }
+
+            @{
+              Timestamp = (Get-Date -Format "o")
+              TotalGB = $totalMemoryGB
+              UsedGB = $usedMemoryGB
+              FreeGB = $freeMemoryGB
+              UsedPercent = $usedPercent
+              FreePercent = [math]::Round(100 - $usedPercent, 2)
+              Status = $status
+              TopConsumers = $topProcesses
+            } | ConvertTo-Json -Depth 3
+          register: memory_status_result
+          changed_when: false
+
+        - name: Parse memory status
+          ansible.builtin.set_fact:
+            memory_status: "{{ memory_status_result.stdout | from_json }}"
+
+        - name: Display memory health
+          ansible.builtin.debug:
+            msg: "Memory: {{ memory_status.UsedGB }}GB / {{ memory_status.TotalGB }}GB ({{ memory_status.UsedPercent }}% used) - {{ memory_status.Status }}"
+
+    # =========================================================================
+    # Check CPU Usage
+    # =========================================================================
+    - name: Check CPU usage
+      tags:
+        - cpu
+        - performance
+      block:
+        - name: Get CPU utilization
+          ansible.windows.win_shell: |
+            # Get CPU samples (average over 3 samples)
+            $samples = @()
+            for ($i = 0; $i -lt 3; $i++) {
+              $samples += (Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+              Start-Sleep -Milliseconds 500
+            }
+            $avgCPU = [math]::Round(($samples | Measure-Object -Average).Average, 2)
+
+            $status = "Healthy"
+            if ($avgCPU -ge {{ cpu_critical_threshold }}) {
+              $status = "Critical"
+            } elseif ($avgCPU -ge {{ cpu_warning_threshold }}) {
+              $status = "Warning"
+            }
+
+            # Get processor info
+            $processor = Get-WmiObject Win32_Processor | Select-Object -First 1
+
+            # Get top CPU consumers
+            $topProcesses = Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | ForEach-Object {
+              @{
+                Name = $_.ProcessName
+                PID = $_.Id
+                CPUTime = [math]::Round($_.CPU, 2)
+              }
+            }
+
+            @{
+              Timestamp = (Get-Date -Format "o")
+              ProcessorName = $processor.Name
+              NumberOfCores = $processor.NumberOfCores
+              NumberOfLogicalProcessors = $processor.NumberOfLogicalProcessors
+              MaxClockSpeedMHz = $processor.MaxClockSpeed
+              CurrentUsagePercent = $avgCPU
+              Status = $status
+              TopConsumers = $topProcesses
+            } | ConvertTo-Json -Depth 3
+          register: cpu_status_result
+          changed_when: false
+
+        - name: Parse CPU status
+          ansible.builtin.set_fact:
+            cpu_status: "{{ cpu_status_result.stdout | from_json }}"
+
+        - name: Display CPU health
+          ansible.builtin.debug:
+            msg: "CPU: {{ cpu_status.CurrentUsagePercent }}% usage on {{ cpu_status.NumberOfLogicalProcessors }} logical processors - {{ cpu_status.Status }}"
+
+    # =========================================================================
+    # Check Windows Update Status
+    # =========================================================================
+    - name: Check Windows Update status
+      tags:
+        - updates
+        - windows_update
+      block:
+        - name: Get Windows Update status
+          ansible.windows.win_shell: |
+            $updateSession = New-Object -ComObject Microsoft.Update.Session
+            $updateSearcher = $updateSession.CreateUpdateSearcher()
+
+            # Check for pending updates
+            $searchResult = $updateSearcher.Search("IsInstalled=0 AND IsHidden=0")
+            $pendingUpdates = @()
+            foreach ($update in $searchResult.Updates) {
+              $pendingUpdates += @{
+                Title = $update.Title
+                Severity = $update.MsrcSeverity
+                Categories = @($update.Categories | ForEach-Object { $_.Name })
+              }
+            }
+
+            # Get last installed update
+            $installedUpdates = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5
+
+            # Check for pending reboot
+            $rebootPending = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+
+            @{
+              Timestamp = (Get-Date -Format "o")
+              PendingUpdateCount = $searchResult.Updates.Count
+              PendingUpdates = $pendingUpdates | Select-Object -First 10
+              LastInstalledUpdate = if ($installedUpdates) {
+                @{
+                  HotFixID = $installedUpdates[0].HotFixID
+                  InstalledOn = $installedUpdates[0].InstalledOn.ToString("o")
+                  Description = $installedUpdates[0].Description
+                }
+              } else { $null }
+              RecentUpdates = @($installedUpdates | ForEach-Object {
+                @{
+                  HotFixID = $_.HotFixID
+                  InstalledOn = $_.InstalledOn.ToString("o")
+                }
+              })
+              RebootRequired = $rebootPending
+            } | ConvertTo-Json -Depth 4
+          register: update_status_result
+          changed_when: false
+
+        - name: Parse Windows Update status
+          ansible.builtin.set_fact:
+            update_status: "{{ update_status_result.stdout | from_json }}"
+
+        - name: Display Windows Update status
+          ansible.builtin.debug:
+            msg: "Windows Update: {{ update_status.PendingUpdateCount }} pending, Reboot Required: {{ update_status.RebootRequired }}"
+
+    # =========================================================================
+    # Network Connectivity Check
+    # =========================================================================
+    - name: Check network connectivity
+      tags:
+        - network
+        - connectivity
+      block:
+        - name: Test network connectivity
+          ansible.windows.win_shell: |
+            $connectivityTests = @{
+              Timestamp = (Get-Date -Format "o")
+              Tests = @()
+            }
+
+            # Test endpoints
+            $endpoints = @(
+              @{ Name = "AWS Metadata"; Host = "169.254.169.254"; Port = 80 },
+              @{ Name = "DNS (Google)"; Host = "8.8.8.8"; Port = 53 },
+              @{ Name = "HTTPS (AWS)"; Host = "aws.amazon.com"; Port = 443 }
+            )
+
+            foreach ($endpoint in $endpoints) {
+              $result = @{
+                Name = $endpoint.Name
+                Host = $endpoint.Host
+                Port = $endpoint.Port
+                Reachable = $false
+                ResponseTimeMs = $null
+              }
+
+              try {
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $connection = $tcp.BeginConnect($endpoint.Host, $endpoint.Port, $null, $null)
+                $wait = $connection.AsyncWaitHandle.WaitOne(3000, $false)
+                $sw.Stop()
+
+                if ($wait) {
+                  $tcp.EndConnect($connection)
+                  $result.Reachable = $true
+                  $result.ResponseTimeMs = $sw.ElapsedMilliseconds
+                }
+                $tcp.Close()
+              } catch {
+                $result.Error = $_.Exception.Message
+              }
+
+              $connectivityTests.Tests += $result
+            }
+
+            # DNS resolution test
+            try {
+              $dnsResult = [System.Net.Dns]::GetHostAddresses("aws.amazon.com")
+              $connectivityTests.DNSResolution = @{
+                Success = $true
+                ResolvedAddresses = @($dnsResult | ForEach-Object { $_.IPAddressToString })
+              }
+            } catch {
+              $connectivityTests.DNSResolution = @{
+                Success = $false
+                Error = $_.Exception.Message
+              }
+            }
+
+            $connectivityTests.Summary = @{
+              TotalTests = $connectivityTests.Tests.Count
+              Passed = ($connectivityTests.Tests | Where-Object { $_.Reachable }).Count
+              Failed = ($connectivityTests.Tests | Where-Object { -not $_.Reachable }).Count
+            }
+
+            $connectivityTests | ConvertTo-Json -Depth 4
+          register: connectivity_result
+          changed_when: false
+
+        - name: Parse connectivity results
+          ansible.builtin.set_fact:
+            network_connectivity: "{{ connectivity_result.stdout | from_json }}"
+
+    # =========================================================================
+    # Generate Health Report
+    # =========================================================================
+    - name: Generate comprehensive health report
+      tags:
+        - report
+        - always
+      block:
+        - name: Calculate overall health status
+          ansible.builtin.set_fact:
+            overall_health: >-
+              {%- set issues = [] -%}
+              {%- if service_status.Summary.CriticalIssues > 0 -%}
+                {%- set _ = issues.append('critical_services') -%}
+              {%- endif -%}
+              {%- if disk_status.Summary.CriticalDisks > 0 -%}
+                {%- set _ = issues.append('disk_space') -%}
+              {%- endif -%}
+              {%- if memory_status.Status == 'Critical' -%}
+                {%- set _ = issues.append('memory') -%}
+              {%- endif -%}
+              {%- if cpu_status.Status == 'Critical' -%}
+                {%- set _ = issues.append('cpu') -%}
+              {%- endif -%}
+              {%- if issues | length > 0 -%}
+                CRITICAL
+              {%- elif disk_status.Summary.WarningDisks > 0 or memory_status.Status == 'Warning' or cpu_status.Status == 'Warning' -%}
+                WARNING
+              {%- else -%}
+                HEALTHY
+              {%- endif -%}
+
+        - name: Create JSON health report
+          ansible.windows.win_copy:
+            content: |
+              {
+                "report_metadata": {
+                  "report_type": "fleet_health_check",
+                  "version": "1.0",
+                  "generated_at": "{{ lookup('pipe', 'date -Iseconds') }}",
+                  "check_started_at": "{{ health_check_start }}",
+                  "hostname": "{{ inventory_hostname }}",
+                  "environment": "{{ hyperion_environment | default('unknown') }}"
+                },
+                "overall_status": "{{ overall_health | trim }}",
+                "summary": {
+                  "services": {
+                    "running": {{ service_status.Summary.Running }},
+                    "total": {{ service_status.Summary.Total }},
+                    "critical_issues": {{ service_status.Summary.CriticalIssues }}
+                  },
+                  "disk": {
+                    "healthy": {{ disk_status.Summary.HealthyDisks }},
+                    "warning": {{ disk_status.Summary.WarningDisks }},
+                    "critical": {{ disk_status.Summary.CriticalDisks }}
+                  },
+                  "memory": {
+                    "used_percent": {{ memory_status.UsedPercent }},
+                    "status": "{{ memory_status.Status }}"
+                  },
+                  "cpu": {
+                    "usage_percent": {{ cpu_status.CurrentUsagePercent }},
+                    "status": "{{ cpu_status.Status }}"
+                  },
+                  "updates": {
+                    "pending": {{ update_status.PendingUpdateCount }},
+                    "reboot_required": {{ update_status.RebootRequired | lower }}
+                  },
+                  "network": {
+                    "tests_passed": {{ network_connectivity.Summary.Passed }},
+                    "tests_total": {{ network_connectivity.Summary.TotalTests }}
+                  }
+                },
+                "system_info": {{ system_info | to_json }},
+                "services": {{ service_status | to_json }},
+                "disk": {{ disk_status | to_json }},
+                "memory": {{ memory_status | to_json }},
+                "cpu": {{ cpu_status | to_json }},
+                "windows_update": {{ update_status | to_json }},
+                "network": {{ network_connectivity | to_json }},
+                "thresholds": {
+                  "disk_warning_percent": {{ disk_warning_threshold }},
+                  "disk_critical_percent": {{ disk_critical_threshold }},
+                  "memory_warning_percent": {{ memory_warning_threshold }},
+                  "memory_critical_percent": {{ memory_critical_threshold }},
+                  "cpu_warning_percent": {{ cpu_warning_threshold }},
+                  "cpu_critical_percent": {{ cpu_critical_threshold }}
+                }
+              }
+            dest: "{{ health_report_dir }}\\health_report_{{ ansible_date_time.date }}.json"
+
+        - name: Read generated report for potential S3 upload
+          ansible.windows.win_shell: |
+            Get-Content "{{ health_report_dir }}\\health_report_{{ ansible_date_time.date }}.json" -Raw
+          register: health_report_content
+          changed_when: false
+
+    # =========================================================================
+    # Upload to S3 (Optional)
+    # =========================================================================
+    - name: Upload health report to S3
+      when: health_upload_s3
+      tags:
+        - upload
+        - s3
+      block:
+        - name: Check AWS CLI availability
+          ansible.windows.win_shell: |
+            if (Get-Command aws -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }
+          register: aws_cli_check
+          failed_when: false
+          changed_when: false
+
+        - name: Upload report to S3
+          ansible.windows.win_shell: |
+            $reportPath = "{{ health_report_dir }}\health_report_{{ ansible_date_time.date }}.json"
+            $s3Path = "s3://{{ health_s3_bucket }}/{{ health_s3_prefix }}/{{ ansible_date_time.date }}/health_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.json"
+            aws s3 cp $reportPath $s3Path --content-type "application/json"
+          when: aws_cli_check.rc == 0
+          register: s3_upload
+
+  post_tasks:
+    - name: Display health check summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Fleet Health Check Complete - {{ inventory_hostname }}
+          ============================================================
+          Overall Status: {{ overall_health | trim }}
+
+          Services:     {{ service_status.Summary.Running }}/{{ service_status.Summary.Total }} running
+          Disk Space:   {{ disk_status.Summary.HealthyDisks }} healthy, {{ disk_status.Summary.WarningDisks }} warning, {{ disk_status.Summary.CriticalDisks }} critical
+          Memory:       {{ memory_status.UsedPercent }}% used ({{ memory_status.Status }})
+          CPU:          {{ cpu_status.CurrentUsagePercent }}% usage ({{ cpu_status.Status }})
+          Updates:      {{ update_status.PendingUpdateCount }} pending, Reboot: {{ update_status.RebootRequired }}
+          Network:      {{ network_connectivity.Summary.Passed }}/{{ network_connectivity.Summary.TotalTests }} tests passed
+
+          Report: {{ health_report_dir }}\health_report_{{ ansible_date_time.date }}.json
+          ============================================================
+      tags: always
+
+    - name: Set health status fact for aggregation
+      ansible.builtin.set_fact:
+        host_health_status:
+          hostname: "{{ inventory_hostname }}"
+          status: "{{ overall_health | trim }}"
+          timestamp: "{{ lookup('pipe', 'date -Iseconds') }}"
+          services_healthy: "{{ service_status.Summary.CriticalIssues == 0 }}"
+          disk_healthy: "{{ disk_status.Summary.CriticalDisks == 0 }}"
+          memory_status: "{{ memory_status.Status }}"
+          cpu_status: "{{ cpu_status.Status }}"
+          pending_updates: "{{ update_status.PendingUpdateCount }}"
+          reboot_required: "{{ update_status.RebootRequired }}"
+      tags: always
+
+# Aggregation play - summarize fleet health
+- name: "Fleet Health Summary"
+  hosts: localhost
+  gather_facts: false
+  tags:
+    - summary
+    - always
+
+  tasks:
+    - name: Aggregate fleet health status
+      ansible.builtin.set_fact:
+        fleet_summary:
+          total_hosts: "{{ groups['all'] | length }}"
+          healthy_hosts: "{{ hostvars | dict2items | selectattr('value.host_health_status.status', 'defined') | selectattr('value.host_health_status.status', 'equalto', 'HEALTHY') | list | length }}"
+          warning_hosts: "{{ hostvars | dict2items | selectattr('value.host_health_status.status', 'defined') | selectattr('value.host_health_status.status', 'equalto', 'WARNING') | list | length }}"
+          critical_hosts: "{{ hostvars | dict2items | selectattr('value.host_health_status.status', 'defined') | selectattr('value.host_health_status.status', 'equalto', 'CRITICAL') | list | length }}"
+
+    - name: Display fleet health summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          FLEET HEALTH SUMMARY
+          ============================================================
+          Total Hosts:    {{ fleet_summary.total_hosts }}
+          Healthy:        {{ fleet_summary.healthy_hosts }}
+          Warning:        {{ fleet_summary.warning_hosts }}
+          Critical:       {{ fleet_summary.critical_hosts }}
+          ============================================================

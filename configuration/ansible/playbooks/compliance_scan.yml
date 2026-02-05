@@ -1,0 +1,587 @@
+---
+# compliance_scan.yml - Run Compliance Checks on Windows Fleet
+#
+# This playbook performs compliance scanning using PowerShell DSC
+# Test-DscConfiguration, collects results, generates JSON reports,
+# and uploads them to S3 for centralized storage and analysis.
+#
+# Usage:
+#   # Run compliance scan on all hosts:
+#   ansible-playbook -i inventories/production playbooks/compliance_scan.yml
+#
+#   # Run with custom S3 bucket:
+#   ansible-playbook -i inventories/production playbooks/compliance_scan.yml \
+#     -e "compliance_s3_bucket=my-compliance-bucket"
+#
+#   # Run specific compliance checks:
+#   ansible-playbook -i inventories/production playbooks/compliance_scan.yml \
+#     --tags security_compliance
+
+- name: "Run Compliance Checks on Windows Fleet"
+  hosts: all
+  gather_facts: true
+  become: true
+  become_method: runas
+  become_user: Administrator
+
+  vars:
+    # S3 bucket for compliance reports
+    compliance_s3_bucket: "{{ hyperion_compliance_bucket | default('hyperion-compliance-reports') }}"
+    compliance_s3_prefix: "{{ hyperion_environment | default('unknown') }}/compliance"
+
+    # Local paths
+    compliance_report_dir: C:\Hyperion\Compliance
+    compliance_report_filename: "compliance_{{ inventory_hostname }}_{{ ansible_date_time.date }}.json"
+
+    # DSC configuration paths
+    dsc_config_path: C:\Hyperion\DSC\Configurations
+    dsc_mof_path: C:\Hyperion\DSC\MOF
+
+    # Compliance thresholds
+    compliance_warning_threshold: 90
+    compliance_critical_threshold: 70
+
+    # Security baseline checks
+    security_baseline_checks:
+      - name: "Password Policy"
+        check: "MinimumPasswordLength"
+        expected: 14
+      - name: "Account Lockout"
+        check: "LockoutBadCount"
+        expected: 5
+      - name: "Audit Policy"
+        check: "AuditLogonEvents"
+        expected: "Success,Failure"
+      - name: "Windows Firewall"
+        check: "FirewallEnabled"
+        expected: true
+      - name: "Windows Defender"
+        check: "DefenderEnabled"
+        expected: true
+      - name: "TLS 1.2"
+        check: "TLS12Enabled"
+        expected: true
+
+  tags:
+    - compliance
+    - audit
+    - scan
+
+  pre_tasks:
+    - name: Validate Windows target
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Windows"
+        fail_msg: "This playbook only supports Windows hosts"
+      tags: always
+
+    - name: Display compliance scan parameters
+      ansible.builtin.debug:
+        msg: |
+          Compliance Scan Parameters:
+          - S3 Bucket: {{ compliance_s3_bucket }}
+          - S3 Prefix: {{ compliance_s3_prefix }}
+          - Report Directory: {{ compliance_report_dir }}
+          - Warning Threshold: {{ compliance_warning_threshold }}%
+          - Critical Threshold: {{ compliance_critical_threshold }}%
+      tags: always
+
+    - name: Create compliance directories
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ compliance_report_dir }}"
+        - "{{ dsc_config_path }}"
+        - "{{ dsc_mof_path }}"
+      tags: always
+
+    - name: Record scan start time
+      ansible.builtin.set_fact:
+        scan_start_time: "{{ ansible_date_time.iso8601 }}"
+      tags: always
+
+  tasks:
+    # =========================================================================
+    # DSC Compliance Check
+    # =========================================================================
+    - name: DSC Compliance Verification
+      tags:
+        - dsc
+        - dsc_compliance
+      block:
+        - name: Check if DSC configuration exists
+          ansible.windows.win_stat:
+            path: "{{ dsc_mof_path }}\\localhost.mof"
+          register: dsc_mof_exists
+
+        - name: Run Test-DscConfiguration
+          ansible.windows.win_shell: |
+            $result = @{
+              Timestamp = (Get-Date -Format "o")
+              Hostname = $env:COMPUTERNAME
+              DscConfigured = $false
+              InDesiredState = $null
+              ResourcesInDesiredState = @()
+              ResourcesNotInDesiredState = @()
+              RebootRequired = $false
+              Error = $null
+            }
+
+            try {
+              # Check if LCM has a configuration
+              $lcmConfig = Get-DscLocalConfigurationManager
+              $result.LcmState = $lcmConfig.LCMState
+              $result.ConfigurationMode = $lcmConfig.ConfigurationMode
+
+              # Check for pending configuration
+              $pendingConfig = Get-DscConfigurationStatus -ErrorAction SilentlyContinue
+              if ($pendingConfig) {
+                $result.LastConfigurationStatus = $pendingConfig.Status
+                $result.LastRunTime = $pendingConfig.StartDate
+              }
+
+              # Run Test-DscConfiguration
+              $testResult = Test-DscConfiguration -Detailed -ErrorAction Stop
+
+              $result.DscConfigured = $true
+              $result.InDesiredState = $testResult.InDesiredState
+              $result.ResourcesInDesiredState = @($testResult.ResourcesInDesiredState | ForEach-Object {
+                @{
+                  ResourceId = $_.ResourceId
+                  InDesiredState = $_.InDesiredState
+                }
+              })
+              $result.ResourcesNotInDesiredState = @($testResult.ResourcesNotInDesiredState | ForEach-Object {
+                @{
+                  ResourceId = $_.ResourceId
+                  InDesiredState = $_.InDesiredState
+                }
+              })
+              $result.RebootRequired = (Get-DscLocalConfigurationManager).LCMState -eq 'PendingReboot'
+
+            } catch [System.Management.Automation.RuntimeException] {
+              if ($_.Exception.Message -match "Current configuration does not exist") {
+                $result.DscConfigured = $false
+                $result.Error = "No DSC configuration applied"
+              } else {
+                $result.Error = $_.Exception.Message
+              }
+            } catch {
+              $result.Error = $_.Exception.Message
+            }
+
+            $result | ConvertTo-Json -Depth 10
+          register: dsc_result
+          changed_when: false
+          failed_when: false
+
+        - name: Parse DSC compliance result
+          ansible.builtin.set_fact:
+            dsc_compliance: "{{ dsc_result.stdout | from_json }}"
+
+        - name: Display DSC compliance status
+          ansible.builtin.debug:
+            msg: |
+              DSC Compliance Status:
+              - Configured: {{ dsc_compliance.DscConfigured }}
+              - In Desired State: {{ dsc_compliance.InDesiredState | default('N/A') }}
+              - Resources Compliant: {{ dsc_compliance.ResourcesInDesiredState | length }}
+              - Resources Non-Compliant: {{ dsc_compliance.ResourcesNotInDesiredState | length }}
+              - Reboot Required: {{ dsc_compliance.RebootRequired | default(false) }}
+
+    # =========================================================================
+    # Security Baseline Compliance
+    # =========================================================================
+    - name: Security Baseline Compliance Check
+      tags:
+        - security
+        - security_compliance
+        - baseline
+      block:
+        - name: Run security baseline compliance checks
+          ansible.windows.win_shell: |
+            $securityChecks = @{
+              Timestamp = (Get-Date -Format "o")
+              Hostname = $env:COMPUTERNAME
+              Checks = @()
+              OverallCompliant = $true
+              ComplianceScore = 0
+            }
+
+            # Password Policy Check
+            $passwordPolicy = @{
+              Name = "Password Policy"
+              Category = "Account Security"
+              Checks = @()
+            }
+
+            # Get password policy via secedit
+            $tempFile = "$env:TEMP\secpol_export.cfg"
+            secedit /export /cfg $tempFile /quiet
+            $secpolContent = Get-Content $tempFile -Raw
+
+            # Minimum Password Length
+            $minLength = if ($secpolContent -match 'MinimumPasswordLength\s*=\s*(\d+)') { [int]$matches[1] } else { 0 }
+            $passwordPolicy.Checks += @{
+              Check = "MinimumPasswordLength"
+              Expected = 14
+              Actual = $minLength
+              Compliant = $minLength -ge 14
+            }
+
+            # Password Complexity
+            $complexity = if ($secpolContent -match 'PasswordComplexity\s*=\s*(\d+)') { [int]$matches[1] } else { 0 }
+            $passwordPolicy.Checks += @{
+              Check = "PasswordComplexity"
+              Expected = 1
+              Actual = $complexity
+              Compliant = $complexity -eq 1
+            }
+
+            # Lockout Policy
+            $lockoutCount = if ($secpolContent -match 'LockoutBadCount\s*=\s*(\d+)') { [int]$matches[1] } else { 0 }
+            $passwordPolicy.Checks += @{
+              Check = "LockoutBadCount"
+              Expected = "5 or less"
+              Actual = $lockoutCount
+              Compliant = $lockoutCount -gt 0 -and $lockoutCount -le 5
+            }
+
+            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            $securityChecks.Checks += $passwordPolicy
+
+            # Firewall Check
+            $firewallCheck = @{
+              Name = "Windows Firewall"
+              Category = "Network Security"
+              Checks = @()
+            }
+
+            $firewallProfiles = Get-NetFirewallProfile
+            foreach ($profile in $firewallProfiles) {
+              $firewallCheck.Checks += @{
+                Check = "$($profile.Name)ProfileEnabled"
+                Expected = $true
+                Actual = $profile.Enabled
+                Compliant = $profile.Enabled
+              }
+            }
+            $securityChecks.Checks += $firewallCheck
+
+            # Windows Defender Check
+            $defenderCheck = @{
+              Name = "Windows Defender"
+              Category = "Endpoint Protection"
+              Checks = @()
+            }
+
+            try {
+              $defenderStatus = Get-MpComputerStatus -ErrorAction Stop
+              $defenderCheck.Checks += @{
+                Check = "RealTimeProtection"
+                Expected = $true
+                Actual = $defenderStatus.RealTimeProtectionEnabled
+                Compliant = $defenderStatus.RealTimeProtectionEnabled
+              }
+              $defenderCheck.Checks += @{
+                Check = "AntivirusSignatureAge"
+                Expected = "Less than 7 days"
+                Actual = "$($defenderStatus.AntivirusSignatureAge) days"
+                Compliant = $defenderStatus.AntivirusSignatureAge -lt 7
+              }
+              $defenderCheck.Checks += @{
+                Check = "BehaviorMonitoring"
+                Expected = $true
+                Actual = $defenderStatus.BehaviorMonitorEnabled
+                Compliant = $defenderStatus.BehaviorMonitorEnabled
+              }
+            } catch {
+              $defenderCheck.Checks += @{
+                Check = "DefenderAvailable"
+                Expected = $true
+                Actual = $false
+                Compliant = $false
+                Error = $_.Exception.Message
+              }
+            }
+            $securityChecks.Checks += $defenderCheck
+
+            # TLS Configuration Check
+            $tlsCheck = @{
+              Name = "TLS Configuration"
+              Category = "Encryption"
+              Checks = @()
+            }
+
+            # Check TLS 1.0 disabled
+            $tls10Path = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server"
+            $tls10Disabled = (Get-ItemProperty -Path $tls10Path -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -eq 0
+            $tlsCheck.Checks += @{
+              Check = "TLS10Disabled"
+              Expected = $true
+              Actual = $tls10Disabled
+              Compliant = $tls10Disabled
+            }
+
+            # Check TLS 1.2 enabled
+            $tls12Path = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server"
+            $tls12Enabled = (Get-ItemProperty -Path $tls12Path -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -ne 0
+            $tlsCheck.Checks += @{
+              Check = "TLS12Enabled"
+              Expected = $true
+              Actual = $tls12Enabled
+              Compliant = $tls12Enabled
+            }
+            $securityChecks.Checks += $tlsCheck
+
+            # Audit Policy Check
+            $auditCheck = @{
+              Name = "Audit Policy"
+              Category = "Logging"
+              Checks = @()
+            }
+
+            $auditPolicies = auditpol /get /category:* /r | ConvertFrom-Csv
+            $criticalAudits = @("Logon", "Account Logon", "Account Management", "Policy Change")
+
+            foreach ($policy in $auditPolicies | Where-Object { $_.Subcategory -in $criticalAudits }) {
+              $auditCheck.Checks += @{
+                Check = $policy.Subcategory
+                Expected = "Success and Failure"
+                Actual = $policy."Inclusion Setting"
+                Compliant = $policy."Inclusion Setting" -match "Success" -and $policy."Inclusion Setting" -match "Failure"
+              }
+            }
+            $securityChecks.Checks += $auditCheck
+
+            # SMB v1 Check
+            $smbCheck = @{
+              Name = "SMB Configuration"
+              Category = "Protocol Security"
+              Checks = @()
+            }
+
+            $smb1Enabled = (Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction SilentlyContinue).State -eq "Enabled"
+            $smbCheck.Checks += @{
+              Check = "SMBv1Disabled"
+              Expected = $true
+              Actual = -not $smb1Enabled
+              Compliant = -not $smb1Enabled
+            }
+            $securityChecks.Checks += $smbCheck
+
+            # Calculate compliance score
+            $totalChecks = 0
+            $passedChecks = 0
+            foreach ($category in $securityChecks.Checks) {
+              foreach ($check in $category.Checks) {
+                $totalChecks++
+                if ($check.Compliant) { $passedChecks++ }
+                else { $securityChecks.OverallCompliant = $false }
+              }
+            }
+            $securityChecks.ComplianceScore = [math]::Round(($passedChecks / $totalChecks) * 100, 2)
+            $securityChecks.TotalChecks = $totalChecks
+            $securityChecks.PassedChecks = $passedChecks
+            $securityChecks.FailedChecks = $totalChecks - $passedChecks
+
+            $securityChecks | ConvertTo-Json -Depth 10
+          register: security_compliance_result
+          changed_when: false
+
+        - name: Parse security compliance result
+          ansible.builtin.set_fact:
+            security_compliance: "{{ security_compliance_result.stdout | from_json }}"
+
+        - name: Display security compliance summary
+          ansible.builtin.debug:
+            msg: |
+              Security Compliance Summary:
+              - Overall Compliant: {{ security_compliance.OverallCompliant }}
+              - Compliance Score: {{ security_compliance.ComplianceScore }}%
+              - Passed Checks: {{ security_compliance.PassedChecks }}/{{ security_compliance.TotalChecks }}
+
+    # =========================================================================
+    # System Configuration Compliance
+    # =========================================================================
+    - name: System Configuration Compliance Check
+      tags:
+        - system
+        - configuration
+      block:
+        - name: Run system configuration compliance checks
+          ansible.windows.win_shell: |
+            $systemChecks = @{
+              Timestamp = (Get-Date -Format "o")
+              Hostname = $env:COMPUTERNAME
+              Checks = @{}
+            }
+
+            # Windows Update Configuration
+            $systemChecks.Checks.WindowsUpdate = @{
+              AutoUpdateEnabled = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -ErrorAction SilentlyContinue).NoAutoUpdate -ne 1
+              LastUpdateCheck = (Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1).InstalledOn
+            }
+
+            # Services Configuration
+            $criticalServices = @("wuauserv", "WinRM", "EventLog", "W32Time")
+            $systemChecks.Checks.Services = @{}
+            foreach ($svc in $criticalServices) {
+              $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+              if ($service) {
+                $systemChecks.Checks.Services[$svc] = @{
+                  Status = $service.Status.ToString()
+                  StartType = $service.StartType.ToString()
+                  Compliant = $service.Status -eq "Running"
+                }
+              }
+            }
+
+            # Disk Space
+            $systemChecks.Checks.DiskSpace = @{}
+            Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+              $freePercent = [math]::Round(($_.FreeSpace / $_.Size) * 100, 2)
+              $systemChecks.Checks.DiskSpace[$_.DeviceID] = @{
+                TotalGB = [math]::Round($_.Size / 1GB, 2)
+                FreeGB = [math]::Round($_.FreeSpace / 1GB, 2)
+                FreePercent = $freePercent
+                Compliant = $freePercent -gt 10
+              }
+            }
+
+            # Time Synchronization
+            $w32tmStatus = w32tm /query /status 2>&1
+            $systemChecks.Checks.TimeSync = @{
+              Source = ($w32tmStatus | Select-String "Source:").ToString().Split(":")[1].Trim()
+              LastSync = ($w32tmStatus | Select-String "Last Successful Sync Time:").ToString().Split(":", 2)[1].Trim()
+              Compliant = $LASTEXITCODE -eq 0
+            }
+
+            $systemChecks | ConvertTo-Json -Depth 10
+          register: system_compliance_result
+          changed_when: false
+
+        - name: Parse system compliance result
+          ansible.builtin.set_fact:
+            system_compliance: "{{ system_compliance_result.stdout | from_json }}"
+
+    # =========================================================================
+    # Generate Consolidated Report
+    # =========================================================================
+    - name: Generate consolidated compliance report
+      tags:
+        - report
+        - generate
+      block:
+        - name: Create consolidated compliance report
+          ansible.windows.win_copy:
+            content: |
+              {
+                "report_metadata": {
+                  "report_type": "compliance_scan",
+                  "version": "1.0",
+                  "generated_at": "{{ lookup('pipe', 'date -Iseconds') }}",
+                  "scan_started_at": "{{ scan_start_time }}",
+                  "hostname": "{{ inventory_hostname }}",
+                  "environment": "{{ hyperion_environment | default('unknown') }}",
+                  "ansible_host": "{{ ansible_host | default(inventory_hostname) }}"
+                },
+                "summary": {
+                  "overall_compliant": {{ (security_compliance.OverallCompliant and (dsc_compliance.InDesiredState | default(true))) | lower }},
+                  "security_compliance_score": {{ security_compliance.ComplianceScore }},
+                  "dsc_in_desired_state": {{ dsc_compliance.InDesiredState | default('null') | lower }},
+                  "warning_threshold": {{ compliance_warning_threshold }},
+                  "critical_threshold": {{ compliance_critical_threshold }},
+                  "status": "{{ 'CRITICAL' if security_compliance.ComplianceScore < compliance_critical_threshold else ('WARNING' if security_compliance.ComplianceScore < compliance_warning_threshold else 'COMPLIANT') }}"
+                },
+                "dsc_compliance": {{ dsc_compliance | to_json }},
+                "security_compliance": {{ security_compliance | to_json }},
+                "system_compliance": {{ system_compliance | to_json }},
+                "system_info": {
+                  "os_name": "{{ ansible_os_name | default('Windows') }}",
+                  "os_version": "{{ ansible_os_version | default('Unknown') }}",
+                  "architecture": "{{ ansible_architecture | default('Unknown') }}",
+                  "domain": "{{ ansible_windows_domain | default('WORKGROUP') }}"
+                }
+              }
+            dest: "{{ compliance_report_dir }}\\{{ compliance_report_filename }}"
+
+        - name: Read generated report for upload
+          ansible.windows.win_shell: |
+            Get-Content "{{ compliance_report_dir }}\\{{ compliance_report_filename }}" -Raw
+          register: compliance_report_content
+          changed_when: false
+
+    # =========================================================================
+    # Upload Report to S3
+    # =========================================================================
+    - name: Upload compliance report to S3
+      tags:
+        - upload
+        - s3
+      block:
+        - name: Check AWS CLI availability
+          ansible.windows.win_shell: |
+            if (Get-Command aws -ErrorAction SilentlyContinue) {
+              aws --version
+              exit 0
+            } else {
+              exit 1
+            }
+          register: aws_cli_check
+          failed_when: false
+          changed_when: false
+
+        - name: Upload report to S3
+          ansible.windows.win_shell: |
+            $reportPath = "{{ compliance_report_dir }}\{{ compliance_report_filename }}"
+            $s3Path = "s3://{{ compliance_s3_bucket }}/{{ compliance_s3_prefix }}/{{ ansible_date_time.date }}/{{ compliance_report_filename }}"
+
+            aws s3 cp $reportPath $s3Path --content-type "application/json"
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Output "Report uploaded successfully to $s3Path"
+            } else {
+              Write-Output "Failed to upload report"
+              exit 1
+            }
+          when: aws_cli_check.rc == 0
+          register: s3_upload
+          changed_when: "'successfully' in s3_upload.stdout"
+
+        - name: Display S3 upload status
+          ansible.builtin.debug:
+            msg: "{{ s3_upload.stdout | default('S3 upload skipped - AWS CLI not available') }}"
+
+  post_tasks:
+    - name: Compliance scan summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Compliance Scan Complete - {{ inventory_hostname }}
+          ============================================================
+          Security Compliance Score: {{ security_compliance.ComplianceScore }}%
+          Status: {{ 'CRITICAL' if security_compliance.ComplianceScore < compliance_critical_threshold else ('WARNING' if security_compliance.ComplianceScore < compliance_warning_threshold else 'COMPLIANT') }}
+          DSC In Desired State: {{ dsc_compliance.InDesiredState | default('N/A') }}
+          Report Location: {{ compliance_report_dir }}\{{ compliance_report_filename }}
+          S3 Location: s3://{{ compliance_s3_bucket }}/{{ compliance_s3_prefix }}/{{ ansible_date_time.date }}/{{ compliance_report_filename }}
+          ============================================================
+      tags: always
+
+    - name: Set compliance status fact for reporting
+      ansible.builtin.set_fact:
+        compliance_status:
+          hostname: "{{ inventory_hostname }}"
+          score: "{{ security_compliance.ComplianceScore }}"
+          status: "{{ 'CRITICAL' if security_compliance.ComplianceScore < compliance_critical_threshold else ('WARNING' if security_compliance.ComplianceScore < compliance_warning_threshold else 'COMPLIANT') }}"
+          timestamp: "{{ lookup('pipe', 'date -Iseconds') }}"
+      tags: always
+
+    - name: Fail if compliance is critical
+      ansible.builtin.fail:
+        msg: "Compliance score {{ security_compliance.ComplianceScore }}% is below critical threshold {{ compliance_critical_threshold }}%"
+      when:
+        - security_compliance.ComplianceScore < compliance_critical_threshold
+        - fail_on_critical | default(false)
+      tags: always
