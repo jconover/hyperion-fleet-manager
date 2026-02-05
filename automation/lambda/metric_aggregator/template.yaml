@@ -1,0 +1,441 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  Hyperion Fleet Manager - Metric Aggregator Lambda
+  Aggregates metrics across the fleet and publishes to custom CloudWatch namespace
+
+# Metadata for SAM CLI
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: hyperion-metric-aggregator
+    Description: Aggregates fleet metrics for Hyperion Fleet Manager
+    Author: Hyperion Team
+    Labels:
+      - monitoring
+      - cloudwatch
+      - fleet-management
+
+# Global settings for all functions
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 120
+    MemorySize: 512
+    Architectures:
+      - x86_64
+    Tracing: Active
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        POWERTOOLS_SERVICE_NAME: hyperion-metric-aggregator
+        POWERTOOLS_METRICS_NAMESPACE: Hyperion/FleetManager
+
+# Template parameters
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - production
+    Description: Deployment environment
+
+  FleetName:
+    Type: String
+    Default: hyperion-fleet
+    Description: Name of the fleet to monitor (used for tag filtering)
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for Lambda function (optional for VPC access)
+    Default: ''
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for Lambda function (optional for VPC access)
+    Default: ''
+
+  EnableVpcAccess:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable VPC access for Lambda function
+
+  AggregationPeriodMinutes:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 60
+    Description: Metric aggregation period in minutes
+
+Conditions:
+  IsVpcEnabled: !Equals [!Ref EnableVpcAccess, 'true']
+  IsProduction: !Equals [!Ref Environment, 'production']
+
+Resources:
+  # Lambda function for metric aggregation
+  MetricAggregatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'hyperion-metric-aggregator-${Environment}'
+      Description: Aggregates fleet metrics and publishes to CloudWatch
+      CodeUri: .
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 120
+      MemorySize: !If [IsProduction, 1024, 512]
+      ReservedConcurrentExecutions: 1  # Prevent concurrent runs
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          FLEET_NAME: !Ref FleetName
+          METRIC_NAMESPACE: Hyperion/FleetManager
+          AGGREGATION_PERIOD_MINUTES: !Ref AggregationPeriodMinutes
+          LOG_LEVEL: !If [IsProduction, 'INFO', 'DEBUG']
+          POWERTOOLS_SERVICE_NAME: hyperion-metric-aggregator
+          POWERTOOLS_METRICS_NAMESPACE: Hyperion/FleetManager
+      Policies:
+        - !Ref MetricAggregatorPolicy
+      VpcConfig:
+        !If
+          - IsVpcEnabled
+          - SecurityGroupIds:
+              - !Ref LambdaSecurityGroup
+            SubnetIds: !Ref SubnetIds
+          - !Ref 'AWS::NoValue'
+      Events:
+        ScheduledEvent:
+          Type: Schedule
+          Properties:
+            Name: !Sub 'hyperion-metric-aggregation-${Environment}'
+            Description: Trigger metric aggregation every 5 minutes
+            Schedule: !Sub 'rate(${AggregationPeriodMinutes} minutes)'
+            Enabled: true
+      Tags:
+        Environment: !Ref Environment
+        Project: hyperion-fleet-manager
+        ManagedBy: sam
+        Component: metric-aggregator
+
+  # IAM policy with least privilege permissions
+  MetricAggregatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'hyperion-metric-aggregator-policy-${Environment}'
+      Description: Permissions for Hyperion Metric Aggregator Lambda
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # CloudWatch permissions - read metrics
+          - Sid: CloudWatchReadMetrics
+            Effect: Allow
+            Action:
+              - cloudwatch:GetMetricData
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:ListMetrics
+            Resource: '*'
+
+          # CloudWatch permissions - write custom metrics
+          - Sid: CloudWatchWriteMetrics
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: 'Hyperion/FleetManager'
+
+          # EC2 permissions - describe instances
+          - Sid: EC2DescribeInstances
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeTags
+            Resource: '*'
+
+          # SSM permissions - read inventory and compliance
+          - Sid: SSMReadInventory
+            Effect: Allow
+            Action:
+              - ssm:DescribeInstanceInformation
+              - ssm:GetInventory
+              - ssm:ListComplianceItems
+              - ssm:ListComplianceSummaries
+              - ssm:ListResourceComplianceSummaries
+              - ssm:DescribeInstancePatchStates
+            Resource: '*'
+
+          # CloudWatch Logs permissions
+          - Sid: CloudWatchLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/hyperion-metric-aggregator-${Environment}:*'
+
+          # X-Ray tracing permissions
+          - Sid: XRayTracing
+            Effect: Allow
+            Action:
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+            Resource: '*'
+
+  # Security group for Lambda when VPC access is enabled
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsVpcEnabled
+    Properties:
+      GroupName: !Sub 'hyperion-metric-aggregator-sg-${Environment}'
+      GroupDescription: Security group for Hyperion Metric Aggregator Lambda
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        # Allow HTTPS outbound for AWS API calls
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS for AWS API access
+      Tags:
+        - Key: Name
+          Value: !Sub 'hyperion-metric-aggregator-sg-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: hyperion-fleet-manager
+
+  # CloudWatch Log Group with retention
+  MetricAggregatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/hyperion-metric-aggregator-${Environment}'
+      RetentionInDays: !If [IsProduction, 30, 7]
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: hyperion-fleet-manager
+
+  # CloudWatch Alarm for Lambda errors
+  MetricAggregatorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hyperion-metric-aggregator-errors-${Environment}'
+      AlarmDescription: Alarm when metric aggregation Lambda has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MetricAggregatorFunction
+
+  # CloudWatch Alarm for Lambda duration
+  MetricAggregatorDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hyperion-metric-aggregator-duration-${Environment}'
+      AlarmDescription: Alarm when metric aggregation takes too long
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 60000  # 60 seconds
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MetricAggregatorFunction
+
+  # CloudWatch Dashboard for monitoring
+  MetricAggregatorDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'Hyperion-MetricAggregator-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Lambda Invocations & Errors",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${MetricAggregatorFunction}"],
+                  [".", "Errors", ".", "."]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Lambda Duration",
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "${MetricAggregatorFunction}", {"stat": "Average"}],
+                  ["...", {"stat": "p99"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Fleet Health Score",
+                "metrics": [
+                  ["Hyperion/FleetManager", "FleetHealthScore", "Environment", "${Environment}", "FleetName", "${FleetName}"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Instance Counts",
+                "metrics": [
+                  ["Hyperion/FleetManager", "InstanceCount", "Environment", "${Environment}", "FleetName", "${FleetName}"],
+                  [".", "RunningInstances", ".", ".", ".", "."],
+                  [".", "StoppedInstances", ".", ".", ".", "."]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "CPU Utilization",
+                "metrics": [
+                  ["Hyperion/FleetManager", "CPUUtilization", "Environment", "${Environment}", "FleetName", "${FleetName}"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 12,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "Memory Utilization",
+                "metrics": [
+                  ["Hyperion/FleetManager", "MemoryUtilization", "Environment", "${Environment}", "FleetName", "${FleetName}"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 12,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "Compliance Score",
+                "metrics": [
+                  ["Hyperion/FleetManager", "ComplianceScore", "Environment", "${Environment}", "FleetName", "${FleetName}"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            }
+          ]
+        }
+
+Outputs:
+  MetricAggregatorFunctionArn:
+    Description: ARN of the Metric Aggregator Lambda function
+    Value: !GetAtt MetricAggregatorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionArn'
+
+  MetricAggregatorFunctionName:
+    Description: Name of the Metric Aggregator Lambda function
+    Value: !Ref MetricAggregatorFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionName'
+
+  MetricAggregatorLogGroupName:
+    Description: Name of the CloudWatch Log Group
+    Value: !Ref MetricAggregatorLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupName'
+
+  MetricAggregatorDashboardName:
+    Description: Name of the CloudWatch Dashboard
+    Value: !Ref MetricAggregatorDashboard
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardName'
+
+  MetricNamespace:
+    Description: CloudWatch namespace for fleet metrics
+    Value: Hyperion/FleetManager
+    Export:
+      Name: !Sub '${AWS::StackName}-MetricNamespace'
