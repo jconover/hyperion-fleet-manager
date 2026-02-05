@@ -38,7 +38,7 @@ jobs:
 
       - name: Upload Checkov SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: checkov-compliance.sarif
           category: checkov-compliance
@@ -53,7 +53,7 @@ jobs:
 
       - name: Upload tfsec SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: tfsec-compliance.sarif
           category: tfsec-compliance
