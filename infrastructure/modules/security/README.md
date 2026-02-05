@@ -314,7 +314,7 @@ tags = {
   CostCenter  = "engineering"
   Compliance  = "SOC2"
   Terraform   = "true"
-  Repository  = "github.com/example/hyperion-fleet-manager"
+  Repository  = "github.com/jconover/hyperion-fleet-manager"
 }
 ```
 

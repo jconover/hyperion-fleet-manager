@@ -28,7 +28,7 @@ fleet-cli/
 ### From Source
 
 ```bash
-git clone https://github.com/hyperion/fleet-manager.git
+git clone https://github.com/jconover/hyperion-fleet-manager.git
 cd fleet-manager/tools/fleet-cli
 go build -o fleet-cli main.go
 sudo mv fleet-cli /usr/local/bin/
@@ -44,7 +44,7 @@ sudo cp bin/fleet-cli /usr/local/bin/
 ### Using Go Install
 
 ```bash
-go install github.com/hyperion/fleet-manager/tools/fleet-cli@latest
+go install github.com/jconover/hyperion-fleet-manager/tools/fleet-cli@latest
 ```
 
 ## Configuration

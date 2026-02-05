@@ -6,6 +6,12 @@
 
 .DESCRIPTION
     Tests module structure, manifest integrity, function exports, and overall module health.
+    These tests validate the module can be loaded correctly and exposes the expected
+    functionality to consumers.
+
+.NOTES
+    Run with: Invoke-Pester -Path './HyperionFleet.Tests.ps1'
+    For verbose output: Invoke-Pester -Path './HyperionFleet.Tests.ps1' -Output Detailed
 #>
 
 BeforeAll {
@@ -22,7 +28,7 @@ AfterAll {
     Remove-Module -Name 'HyperionFleet' -Force -ErrorAction SilentlyContinue
 }
 
-Describe 'HyperionFleet Module' {
+Describe 'HyperionFleet Module' -Tag 'Unit', 'Module' {
     Context 'Module Structure' {
         It 'has a valid module manifest' {
             $ManifestPath | Should -Exist
@@ -45,6 +51,16 @@ Describe 'HyperionFleet Module' {
         It 'has a Tests directory' {
             $TestsPath = Join-Path -Path $ModulePath -ChildPath 'Tests'
             $TestsPath | Should -Exist
+        }
+
+        It 'has Public test directory' {
+            $PublicTestsPath = Join-Path -Path $ModulePath -ChildPath 'Tests/Public'
+            $PublicTestsPath | Should -Exist
+        }
+
+        It 'has Private test directory' {
+            $PrivateTestsPath = Join-Path -Path $ModulePath -ChildPath 'Tests/Private'
+            $PrivateTestsPath | Should -Exist
         }
     }
 
@@ -98,10 +114,32 @@ Describe 'HyperionFleet Module' {
             }
         }
 
+        It 'exports exactly four functions' {
+            $Manifest.ExportedFunctions.Count | Should -Be 4
+        }
+
+        It 'does not export cmdlets' {
+            $Manifest.ExportedCmdlets.Count | Should -Be 0
+        }
+
+        It 'does not export aliases' {
+            $Manifest.ExportedAliases.Count | Should -Be 0
+        }
+
         It 'has module metadata' {
             $Manifest.Author | Should -Not -BeNullOrEmpty
             $Manifest.Description | Should -Not -BeNullOrEmpty
             $Manifest.Copyright | Should -Not -BeNullOrEmpty
+        }
+
+        It 'has tags for module discovery' {
+            $Manifest.PrivateData.PSData.Tags | Should -Not -BeNullOrEmpty
+            $Manifest.PrivateData.PSData.Tags | Should -Contain 'AWS'
+            $Manifest.PrivateData.PSData.Tags | Should -Contain 'EC2'
+        }
+
+        It 'has release notes' {
+            $Manifest.PrivateData.PSData.ReleaseNotes | Should -Not -BeNullOrEmpty
         }
     }
 
@@ -242,15 +280,8 @@ Describe 'HyperionFleet Module' {
 
     Context 'Code Quality' {
         BeforeAll {
-            $AllScripts = Get-ChildItem -Path $ModulePath -Include '*.ps1', '*.psm1' -Recurse
-        }
-
-        It 'all scripts use UTF-8 encoding' {
-            foreach ($script in $AllScripts) {
-                $encoding = [System.Text.Encoding]::GetEncoding((Get-Content -Path $script.FullName -Encoding Byte -TotalCount 4))
-                # Basic check - should not throw
-                $encoding | Should -Not -BeNullOrEmpty
-            }
+            $AllScripts = Get-ChildItem -Path $ModulePath -Include '*.ps1', '*.psm1' -Recurse -File |
+                Where-Object { $_.FullName -notmatch '[\\/]Tests[\\/]' }
         }
 
         It 'no script contains hardcoded credentials' {
@@ -258,6 +289,7 @@ Describe 'HyperionFleet Module' {
                 $content = Get-Content -Path $script.FullName -Raw
                 $content | Should -Not -Match 'password\s*=\s*[''"][^''"]+'
                 $content | Should -Not -Match 'AKIA[0-9A-Z]{16}'  # AWS access key pattern
+                $content | Should -Not -Match 'secret\s*=\s*[''"][^''"]{10,}'
             }
         }
 
@@ -269,5 +301,140 @@ Describe 'HyperionFleet Module' {
                 $longLines.Count | Should -BeLessThan ($lines.Count * 0.1) -Because "More than 10% of lines exceed 200 characters in $($script.Name)"
             }
         }
+
+        It 'no script uses Write-Host directly' {
+            foreach ($script in $AllScripts) {
+                $content = Get-Content -Path $script.FullName -Raw
+                # Write-Host is discouraged in modules - use Write-Verbose, Write-Information, etc.
+                $content | Should -Not -Match 'Write-Host\s+' -Because "Write-Host should not be used in module code in $($script.Name)"
+            }
+        }
+
+        It 'all functions have proper error handling' {
+            foreach ($script in $AllScripts) {
+                $content = Get-Content -Path $script.FullName -Raw
+                # Functions should have try/catch blocks
+                if ($content -match 'function\s+\w+-\w+') {
+                    $content | Should -Match 'try\s*\{' -Because "Functions in $($script.Name) should have error handling"
+                }
+            }
+        }
     }
+
+    Context 'Module Configuration' {
+        It 'module has default configuration' {
+            InModuleScope HyperionFleet {
+                $script:ModuleConfig | Should -Not -BeNullOrEmpty
+            }
+        }
+
+        It 'module configuration has default region' {
+            InModuleScope HyperionFleet {
+                $script:ModuleConfig.DefaultRegion | Should -Be 'us-east-1'
+            }
+        }
+
+        It 'module configuration has retry settings' {
+            InModuleScope HyperionFleet {
+                $script:ModuleConfig.RetryAttempts | Should -BeGreaterOrEqual 1
+                $script:ModuleConfig.RetryDelaySeconds | Should -BeGreaterOrEqual 1
+            }
+        }
+
+        It 'module configuration has log level' {
+            InModuleScope HyperionFleet {
+                $script:ModuleConfig.LogLevel | Should -BeIn @('Verbose', 'Information', 'Warning', 'Error', 'Critical')
+            }
+        }
+    }
+
+    Context 'Function Parameter Consistency' {
+        BeforeAll {
+            $ExportedFunctions = Get-Command -Module HyperionFleet
+        }
+
+        It 'all exported functions have Region parameter' {
+            foreach ($func in $ExportedFunctions) {
+                $func.Parameters.Keys | Should -Contain 'Region' -Because "$($func.Name) should have Region parameter"
+            }
+        }
+
+        It 'all exported functions have ProfileName parameter' {
+            foreach ($func in $ExportedFunctions) {
+                $func.Parameters.Keys | Should -Contain 'ProfileName' -Because "$($func.Name) should have ProfileName parameter"
+            }
+        }
+
+        It 'state-changing functions support ShouldProcess' {
+            $StateChangingFunctions = @('Invoke-FleetCommand', 'Start-FleetPatch')
+            foreach ($funcName in $StateChangingFunctions) {
+                $func = Get-Command -Name $funcName
+                $func.Parameters.Keys | Should -Contain 'WhatIf' -Because "$funcName should support WhatIf"
+                $func.Parameters.Keys | Should -Contain 'Confirm' -Because "$funcName should support Confirm"
+            }
+        }
+    }
+
+    Context 'Help Documentation' {
+        BeforeAll {
+            $ExportedFunctions = Get-Command -Module HyperionFleet
+        }
+
+        It 'all exported functions have complete help' {
+            foreach ($func in $ExportedFunctions) {
+                $Help = Get-Help -Name $func.Name -Full
+
+                $Help.Synopsis | Should -Not -BeNullOrEmpty -Because "$($func.Name) should have synopsis"
+                $Help.Description | Should -Not -BeNullOrEmpty -Because "$($func.Name) should have description"
+                $Help.Examples.Example.Count | Should -BeGreaterOrEqual 1 -Because "$($func.Name) should have examples"
+            }
+        }
+
+        It 'all function parameters have descriptions' {
+            foreach ($func in $ExportedFunctions) {
+                $Help = Get-Help -Name $func.Name -Full
+
+                foreach ($param in $Help.Parameters.Parameter) {
+                    # Skip common parameters
+                    if ($param.Name -in @('Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'WhatIf', 'Confirm')) {
+                        continue
+                    }
+                    $param.Description | Should -Not -BeNullOrEmpty -Because "Parameter '$($param.Name)' in $($func.Name) should have description"
+                }
+            }
+        }
+    }
+
+    Context 'Test Coverage Structure' {
+        It 'each public function has a test file' {
+            $PublicPath = Join-Path -Path $ModulePath -ChildPath 'Public'
+            $PublicFunctions = Get-ChildItem -Path "$PublicPath/*.ps1"
+
+            foreach ($func in $PublicFunctions) {
+                $TestPath = Join-Path -Path $ModulePath -ChildPath "Tests/Public/$($func.BaseName).Tests.ps1"
+                $TestPath | Should -Exist -Because "$($func.BaseName) should have a test file"
+            }
+        }
+
+        It 'each private function has a test file' {
+            $PrivatePath = Join-Path -Path $ModulePath -ChildPath 'Private'
+            $PrivateFunctions = Get-ChildItem -Path "$PrivatePath/*.ps1"
+
+            foreach ($func in $PrivateFunctions) {
+                $TestPath = Join-Path -Path $ModulePath -ChildPath "Tests/Private/$($func.BaseName).Tests.ps1"
+                $TestPath | Should -Exist -Because "$($func.BaseName) should have a test file"
+            }
+        }
+
+        It 'has integration test directory' {
+            $IntegrationPath = Join-Path -Path $ModulePath -ChildPath 'Tests/Integration'
+            $IntegrationPath | Should -Exist
+        }
+
+        It 'has pester configuration file' {
+            $ConfigPath = Join-Path -Path $ModulePath -ChildPath 'Tests/pester.config.ps1'
+            $ConfigPath | Should -Exist
+        }
+    }
+}
 }

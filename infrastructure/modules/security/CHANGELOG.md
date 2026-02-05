@@ -267,7 +267,7 @@ For questions about changes or upgrades:
 
 ## Links
 
-- [Repository](https://github.com/example/hyperion-fleet-manager)
-- [Issue Tracker](https://github.com/example/hyperion-fleet-manager/issues)
+- [Repository](https://github.com/jconover/hyperion-fleet-manager)
+- [Issue Tracker](https://github.com/jconover/hyperion-fleet-manager/issues)
 - [Security Policy](SECURITY.md)
 - [Contributing Guide](../../../CONTRIBUTING.md)

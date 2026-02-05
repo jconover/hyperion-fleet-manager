@@ -71,7 +71,7 @@ git clone https://github.com/jconover/hyperion-fleet-manager.git
 cd hyperion-fleet-manager
 
 # 3. Add upstream remote
-git remote add upstream https://github.com/ORIGINAL_OWNER/hyperion-fleet-manager.git
+git remote add upstream https://github.com/jconover/hyperion-fleet-manager.git
 
 # 4. Install development tools
 # On macOS
@@ -100,7 +100,7 @@ aws --version
 
 ### 1. Select or Create an Issue
 
-- Check [existing issues](https://github.com/ORIGINAL_OWNER/hyperion-fleet-manager/issues)
+- Check [existing issues](https://github.com/jconover/hyperion-fleet-manager/issues)
 - Comment on the issue to claim it
 - For new features, create an issue first to discuss
 
