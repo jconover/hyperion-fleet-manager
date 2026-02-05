@@ -1,0 +1,92 @@
+# Hyperion Fleet Manager - CloudWatch Data Source Configuration
+# This file configures the Amazon CloudWatch data source for Grafana
+#
+# Documentation: https://grafana.com/docs/grafana/latest/datasources/cloudwatch/
+#
+# Requirements:
+# - Grafana must have IAM credentials configured (via instance profile, environment variables, or credentials file)
+# - Required IAM permissions are listed in the project README
+#
+# Environment Variables (optional):
+# - AWS_DEFAULT_REGION: Override the default region
+# - AWS_ACCESS_KEY_ID: AWS access key (not recommended for production)
+# - AWS_SECRET_ACCESS_KEY: AWS secret key (not recommended for production)
+# - AWS_ASSUME_ROLE_ARN: IAM role ARN for Grafana to assume
+
+apiVersion: 1
+
+# List of data sources to delete from the database
+deleteDatasources: []
+
+# List of data sources to insert/update
+datasources:
+  # Primary CloudWatch data source
+  - name: Amazon CloudWatch
+    type: cloudwatch
+    uid: cloudwatch
+    access: proxy
+
+    # Make this the default data source
+    isDefault: true
+
+    # JSON data configuration
+    jsonData:
+      # Authentication type: Use IAM role assumed by the Grafana instance
+      # Options: default, keys, credentials, arn
+      authType: default
+
+      # Default AWS region - can be overridden by environment variable
+      # Billing metrics are only available in us-east-1
+      defaultRegion: ${AWS_DEFAULT_REGION:us-east-1}
+
+      # Custom metrics namespaces to include in autocomplete
+      customMetricsNamespaces: "Hyperion/Compliance,Hyperion/Costs,Hyperion/DSC,CWAgent"
+
+      # Assume role configuration (optional)
+      # Uncomment and configure if Grafana needs to assume a different IAM role
+      # assumeRoleArn: ${AWS_ASSUME_ROLE_ARN}
+
+      # External ID for cross-account access (optional)
+      # externalId: ""
+
+      # Endpoint configuration (optional, for VPC endpoints or LocalStack)
+      # endpoint: ""
+
+      # Timeout for CloudWatch API requests
+      timeout: "30"
+
+      # Log groups configuration for CloudWatch Logs Insights
+      logsTimeout: "30"
+
+      # Enable Metrics Insights SQL queries
+      tracingDatasourceUid: ""
+
+    # Sensitive data configuration
+    secureJsonData:
+      # If using access keys instead of IAM role (not recommended for production)
+      # accessKey: ${AWS_ACCESS_KEY_ID}
+      # secretKey: ${AWS_SECRET_ACCESS_KEY}
+
+      # Session token for temporary credentials (if applicable)
+      # sessionToken: ""
+
+    # Versioning (increase this to update data source)
+    version: 1
+
+    # Make this data source editable in the UI
+    editable: false
+
+  # Secondary CloudWatch data source for cross-region metrics (optional)
+  # Uncomment if you need to query metrics from multiple regions simultaneously
+  #
+  # - name: CloudWatch (EU)
+  #   type: cloudwatch
+  #   uid: cloudwatch-eu
+  #   access: proxy
+  #   isDefault: false
+  #   jsonData:
+  #     authType: default
+  #     defaultRegion: eu-west-1
+  #     customMetricsNamespaces: "Hyperion/Compliance,Hyperion/Costs,Hyperion/DSC,CWAgent"
+  #   version: 1
+  #   editable: false

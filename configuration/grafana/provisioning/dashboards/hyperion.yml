@@ -1,0 +1,64 @@
+# Hyperion Fleet Manager - Dashboard Provisioning Configuration
+# This file configures automatic dashboard provisioning from the file system
+#
+# Documentation: https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
+#
+# Dashboards in the configured path will be automatically loaded on Grafana startup
+# and refreshed at the specified interval.
+
+apiVersion: 1
+
+# List of dashboard providers
+providers:
+  # Hyperion Fleet Manager Dashboards
+  - name: 'Hyperion Fleet Manager'
+
+    # Unique identifier for this provider
+    orgId: 1
+
+    # Grafana folder where dashboards will be stored
+    # This creates a dedicated folder for Hyperion dashboards
+    folder: 'Hyperion Fleet Manager'
+
+    # Folder UID (optional, auto-generated if not specified)
+    folderUid: 'hyperion-fleet-manager'
+
+    # Provider type - always 'file' for file-based provisioning
+    type: file
+
+    # Disable deletion of dashboards that are removed from the provisioned path
+    # Set to false if you want removed files to be deleted from Grafana
+    disableDeletion: false
+
+    # Allow updates from the Grafana UI
+    # Set to false to make dashboards read-only (recommended for production)
+    # When false, users can view but not save changes
+    allowUiUpdates: false
+
+    # Update interval - how often to check for dashboard changes
+    # Format: Go duration (e.g., 10s, 1m, 5m)
+    updateIntervalSeconds: 30
+
+    # Options specific to the 'file' provider
+    options:
+      # Path to the directory containing dashboard JSON files
+      # Relative to Grafana's working directory or absolute path
+      path: /etc/grafana/dashboards/hyperion
+
+      # Recursively search for dashboards in subdirectories
+      # Set to true if you organize dashboards in subdirectories
+      # foldersFromFilesStructure: false
+
+# Additional providers can be added for different dashboard categories
+# Example: Separate providers for different teams or environments
+#
+# - name: 'Infrastructure'
+#   orgId: 1
+#   folder: 'Infrastructure'
+#   folderUid: 'infrastructure'
+#   type: file
+#   disableDeletion: false
+#   allowUiUpdates: false
+#   updateIntervalSeconds: 60
+#   options:
+#     path: /etc/grafana/dashboards/infrastructure
