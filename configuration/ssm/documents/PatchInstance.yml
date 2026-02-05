@@ -1,0 +1,1176 @@
+---
+# Hyperion Fleet Manager - Patch Instance
+# SSM Automation Document for Windows patching with safety controls
+#
+# This document performs safe Windows patching with pre-checks,
+# snapshots, installation, reboot handling, and validation.
+
+schemaVersion: "0.3"
+description: |
+  Patch Windows instance with Windows Updates including pre-patch health checks,
+  EBS snapshot creation, update installation, reboot handling, post-patch validation,
+  and comprehensive result reporting.
+
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: "(Required) The ARN of the IAM role that allows Automation to perform actions on your behalf."
+    default: ""
+
+  TargetInstances:
+    type: StringList
+    description: "(Required) List of target instance IDs to patch."
+
+  PatchClassification:
+    type: StringList
+    description: "(Optional) Classifications of patches to install."
+    default:
+      - CriticalUpdates
+      - SecurityUpdates
+      - UpdateRollups
+    allowedValues:
+      - CriticalUpdates
+      - SecurityUpdates
+      - UpdateRollups
+      - Updates
+      - DefinitionUpdates
+      - Drivers
+      - FeaturePacks
+      - ServicePacks
+
+  RebootOption:
+    type: String
+    description: "(Optional) Reboot behavior after patching."
+    allowedValues:
+      - RebootIfNeeded
+      - NoReboot
+      - ScheduleReboot
+    default: "RebootIfNeeded"
+
+  ScheduledRebootTime:
+    type: String
+    description: "(Optional) Time for scheduled reboot in HH:MM format (24-hour, UTC). Only used if RebootOption is ScheduleReboot."
+    default: "03:00"
+
+  CreateSnapshot:
+    type: String
+    description: "(Optional) Create EBS snapshot before patching."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "true"
+
+  SnapshotRetentionDays:
+    type: String
+    description: "(Optional) Number of days to retain pre-patch snapshots."
+    default: "7"
+
+  MaxConcurrency:
+    type: String
+    description: "(Optional) Maximum concurrent instances to patch."
+    default: "5"
+
+  MaxErrors:
+    type: String
+    description: "(Optional) Maximum errors before stopping automation."
+    default: "2"
+
+  Environment:
+    type: String
+    description: "(Required) Environment identifier."
+    allowedValues:
+      - dev
+      - staging
+      - prod
+    default: "dev"
+
+  DryRun:
+    type: String
+    description: "(Optional) Perform dry run without installing patches."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "false"
+
+outputs:
+  - PrePatchHealthCheck.Output
+  - CreateEBSSnapshot.SnapshotId
+  - InstallPatches.Output
+  - PostPatchValidation.Output
+  - ReportResults.Output
+
+mainSteps:
+  - name: PrePatchHealthCheck
+    action: aws:runCommand
+    description: Perform pre-patch health check to ensure instance is ready for patching.
+    timeoutSeconds: 600
+    maxAttempts: 2
+    onFailure: Abort
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Pre-Patch Health Check
+            $ErrorActionPreference = 'Stop'
+
+            $Environment = '{{ Environment }}'
+            $DryRun = '{{ DryRun }}'
+
+            # Setup paths
+            $HyperionRoot = 'C:\HyperionFleet'
+            $PatchRoot = Join-Path $HyperionRoot 'Patching'
+            $LogPath = Join-Path $PatchRoot 'Logs'
+            $ReportsPath = Join-Path $PatchRoot 'Reports'
+
+            @($PatchRoot, $LogPath, $ReportsPath) | ForEach-Object {
+                if (-not (Test-Path $_)) {
+                    New-Item -Path $_ -ItemType Directory -Force | Out-Null
+                }
+            }
+
+            $LogFile = Join-Path $LogPath "pre-patch-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Pre-Patch Health Check ==="
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+                Write-Output "Environment: $Environment"
+                Write-Output "Dry Run: $DryRun"
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                $HealthCheck = @{
+                    InstanceId = $InstanceId
+                    Timestamp = (Get-Date).ToString('o')
+                    Environment = $Environment
+                    Checks = @{}
+                    OverallStatus = 'Healthy'
+                    Warnings = @()
+                    Blockers = @()
+                }
+
+                # Check 1: Disk Space
+                Write-Output ""
+                Write-Output "Checking disk space..."
+                $SystemDrive = Get-PSDrive -Name C
+                $FreeSpaceGB = [math]::Round($SystemDrive.Free / 1GB, 2)
+                $HealthCheck.Checks.DiskSpace = @{
+                    FreeSpaceGB = $FreeSpaceGB
+                    MinimumRequired = 10
+                    Status = if ($FreeSpaceGB -ge 10) { 'Pass' } else { 'Fail' }
+                }
+
+                if ($FreeSpaceGB -lt 10) {
+                    $HealthCheck.Blockers += "Insufficient disk space: ${FreeSpaceGB}GB free (minimum 10GB required)"
+                    $HealthCheck.OverallStatus = 'Unhealthy'
+                } elseif ($FreeSpaceGB -lt 20) {
+                    $HealthCheck.Warnings += "Low disk space: ${FreeSpaceGB}GB free"
+                }
+                Write-Output "  Free space: ${FreeSpaceGB}GB - $($HealthCheck.Checks.DiskSpace.Status)"
+
+                # Check 2: Windows Update Service
+                Write-Output ""
+                Write-Output "Checking Windows Update service..."
+                $WUService = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
+                $HealthCheck.Checks.WindowsUpdateService = @{
+                    Status = $WUService.Status.ToString()
+                    StartType = $WUService.StartType.ToString()
+                    CanStart = $true
+                }
+
+                if ($WUService.Status -ne 'Running') {
+                    try {
+                        Start-Service -Name wuauserv -ErrorAction Stop
+                        $HealthCheck.Checks.WindowsUpdateService.Status = 'Running'
+                        Write-Output "  Windows Update service started"
+                    } catch {
+                        $HealthCheck.Checks.WindowsUpdateService.CanStart = $false
+                        $HealthCheck.Blockers += "Cannot start Windows Update service: $_"
+                        $HealthCheck.OverallStatus = 'Unhealthy'
+                    }
+                }
+                Write-Output "  Service status: $($HealthCheck.Checks.WindowsUpdateService.Status)"
+
+                # Check 3: Pending Reboots
+                Write-Output ""
+                Write-Output "Checking for pending reboots..."
+                $PendingReboot = $false
+                $RebootReasons = @()
+
+                # Check Component Based Servicing
+                $CBSKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+                if (Test-Path $CBSKey) {
+                    $PendingReboot = $true
+                    $RebootReasons += 'Component Based Servicing'
+                }
+
+                # Check Windows Update
+                $WUKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+                if (Test-Path $WUKey) {
+                    $PendingReboot = $true
+                    $RebootReasons += 'Windows Update'
+                }
+
+                # Check Pending File Rename
+                $PFROKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+                $PFROValue = Get-ItemProperty -Path $PFROKey -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+                if ($PFROValue.PendingFileRenameOperations) {
+                    $PendingReboot = $true
+                    $RebootReasons += 'Pending File Rename'
+                }
+
+                $HealthCheck.Checks.PendingReboot = @{
+                    IsPending = $PendingReboot
+                    Reasons = $RebootReasons
+                    Status = if ($PendingReboot) { 'Warning' } else { 'Pass' }
+                }
+
+                if ($PendingReboot) {
+                    $HealthCheck.Warnings += "Pending reboot detected: $($RebootReasons -join ', ')"
+                }
+                Write-Output "  Pending reboot: $PendingReboot"
+
+                # Check 4: System Uptime
+                Write-Output ""
+                Write-Output "Checking system uptime..."
+                $OS = Get-CimInstance -ClassName Win32_OperatingSystem
+                $Uptime = (Get-Date) - $OS.LastBootUpTime
+                $UptimeDays = [math]::Round($Uptime.TotalDays, 2)
+
+                $HealthCheck.Checks.Uptime = @{
+                    LastBootTime = $OS.LastBootUpTime.ToString('o')
+                    UptimeDays = $UptimeDays
+                    Status = 'Pass'
+                }
+
+                if ($UptimeDays -gt 90) {
+                    $HealthCheck.Warnings += "System has not been rebooted in $UptimeDays days"
+                }
+                Write-Output "  Uptime: $UptimeDays days"
+
+                # Check 5: Memory Usage
+                Write-Output ""
+                Write-Output "Checking memory usage..."
+                $Memory = Get-CimInstance -ClassName Win32_OperatingSystem
+                $TotalMemoryGB = [math]::Round($Memory.TotalVisibleMemorySize / 1MB, 2)
+                $FreeMemoryGB = [math]::Round($Memory.FreePhysicalMemory / 1MB, 2)
+                $MemoryUsagePercent = [math]::Round((1 - ($FreeMemoryGB / $TotalMemoryGB)) * 100, 2)
+
+                $HealthCheck.Checks.Memory = @{
+                    TotalGB = $TotalMemoryGB
+                    FreeGB = $FreeMemoryGB
+                    UsagePercent = $MemoryUsagePercent
+                    Status = if ($MemoryUsagePercent -lt 90) { 'Pass' } else { 'Warning' }
+                }
+
+                if ($MemoryUsagePercent -ge 90) {
+                    $HealthCheck.Warnings += "High memory usage: ${MemoryUsagePercent}%"
+                }
+                Write-Output "  Memory usage: ${MemoryUsagePercent}%"
+
+                # Check 6: Critical Services
+                Write-Output ""
+                Write-Output "Checking critical services..."
+                $CriticalServices = @('W32Time', 'Winmgmt', 'EventLog', 'BITS')
+                $ServiceStatus = @{}
+
+                foreach ($ServiceName in $CriticalServices) {
+                    $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+                    if ($Service) {
+                        $ServiceStatus[$ServiceName] = @{
+                            Status = $Service.Status.ToString()
+                            StartType = $Service.StartType.ToString()
+                        }
+                        if ($Service.Status -ne 'Running' -and $Service.StartType -ne 'Disabled') {
+                            $HealthCheck.Warnings += "Service $ServiceName is not running"
+                        }
+                    }
+                }
+
+                $HealthCheck.Checks.CriticalServices = @{
+                    Services = $ServiceStatus
+                    Status = 'Pass'
+                }
+                Write-Output "  Critical services checked: $($CriticalServices.Count)"
+
+                # Check 7: Available Updates (scan only)
+                Write-Output ""
+                Write-Output "Scanning for available updates..."
+                try {
+                    $UpdateSession = New-Object -ComObject Microsoft.Update.Session
+                    $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+                    $SearchResult = $UpdateSearcher.Search("IsInstalled=0 and Type='Software'")
+
+                    $HealthCheck.Checks.AvailableUpdates = @{
+                        Count = $SearchResult.Updates.Count
+                        Updates = @()
+                        Status = 'Info'
+                    }
+
+                    foreach ($Update in $SearchResult.Updates) {
+                        $HealthCheck.Checks.AvailableUpdates.Updates += @{
+                            Title = $Update.Title
+                            KB = ($Update.KBArticleIDs | Select-Object -First 1)
+                            Severity = $Update.MsrcSeverity
+                            Size = [math]::Round($Update.MaxDownloadSize / 1MB, 2)
+                            RequiresReboot = $Update.RebootRequired
+                        }
+                    }
+
+                    Write-Output "  Available updates: $($SearchResult.Updates.Count)"
+                } catch {
+                    $HealthCheck.Warnings += "Could not scan for updates: $_"
+                    Write-Output "  Update scan failed: $_"
+                }
+
+                # Determine overall status
+                if ($HealthCheck.Blockers.Count -gt 0) {
+                    $HealthCheck.OverallStatus = 'Unhealthy'
+                    $HealthCheck.ReadyForPatching = $false
+                } elseif ($HealthCheck.Warnings.Count -gt 0) {
+                    if ($HealthCheck.OverallStatus -ne 'Unhealthy') {
+                        $HealthCheck.OverallStatus = 'Warning'
+                    }
+                    $HealthCheck.ReadyForPatching = $true
+                } else {
+                    $HealthCheck.ReadyForPatching = $true
+                }
+
+                # Save health check report
+                $HealthCheckFile = Join-Path $ReportsPath 'pre-patch-health.json'
+                $HealthCheck | ConvertTo-Json -Depth 10 | Set-Content -Path $HealthCheckFile
+
+                Write-Output ""
+                Write-Output "=== Health Check Summary ==="
+                Write-Output "Overall Status: $($HealthCheck.OverallStatus)"
+                Write-Output "Ready for Patching: $($HealthCheck.ReadyForPatching)"
+                Write-Output "Warnings: $($HealthCheck.Warnings.Count)"
+                Write-Output "Blockers: $($HealthCheck.Blockers.Count)"
+
+                if (-not $HealthCheck.ReadyForPatching) {
+                    Write-Output ""
+                    Write-Output "BLOCKERS:"
+                    $HealthCheck.Blockers | ForEach-Object { Write-Output "  - $_" }
+                    throw "Instance is not ready for patching"
+                }
+
+                if ($HealthCheck.Warnings.Count -gt 0) {
+                    Write-Output ""
+                    Write-Output "WARNINGS:"
+                    $HealthCheck.Warnings | ForEach-Object { Write-Output "  - $_" }
+                }
+
+                Write-Output ""
+                Write-Output "HEALTH_CHECK_STATUS=$($HealthCheck.OverallStatus)"
+                Write-Output "READY_FOR_PATCHING=$($HealthCheck.ReadyForPatching)"
+
+            } catch {
+                Write-Error "Pre-patch health check failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: CreateEBSSnapshot
+    action: aws:executeScript
+    description: Create EBS snapshot of root volume before patching.
+    timeoutSeconds: 600
+    onFailure: Abort
+    inputs:
+      Runtime: python3.8
+      Handler: create_snapshot
+      InputPayload:
+        InstanceIds: "{{ TargetInstances }}"
+        CreateSnapshot: "{{ CreateSnapshot }}"
+        RetentionDays: "{{ SnapshotRetentionDays }}"
+        Environment: "{{ Environment }}"
+      Script: |
+        import boto3
+        import datetime
+
+        def create_snapshot(events, context):
+            create_snapshot_flag = events.get('CreateSnapshot', 'true')
+            if create_snapshot_flag.lower() != 'true':
+                return {'SnapshotId': 'SKIPPED', 'Message': 'Snapshot creation disabled'}
+
+            instance_ids = events.get('InstanceIds', [])
+            retention_days = int(events.get('RetentionDays', 7))
+            environment = events.get('Environment', 'dev')
+
+            ec2 = boto3.client('ec2')
+            snapshots = []
+
+            for instance_id in instance_ids:
+                # Get instance details
+                response = ec2.describe_instances(InstanceIds=[instance_id])
+                instance = response['Reservations'][0]['Instances'][0]
+
+                # Find root volume
+                root_device = instance['RootDeviceName']
+                root_volume_id = None
+
+                for mapping in instance['BlockDeviceMappings']:
+                    if mapping['DeviceName'] == root_device:
+                        root_volume_id = mapping['Ebs']['VolumeId']
+                        break
+
+                if not root_volume_id:
+                    raise Exception(f'Root volume not found for instance {instance_id}')
+
+                # Create snapshot
+                delete_date = datetime.datetime.now() + datetime.timedelta(days=retention_days)
+                snapshot_response = ec2.create_snapshot(
+                    VolumeId=root_volume_id,
+                    Description=f'Pre-patch snapshot for {instance_id} - Hyperion Fleet Manager',
+                    TagSpecifications=[
+                        {
+                            'ResourceType': 'snapshot',
+                            'Tags': [
+                                {'Key': 'Name', 'Value': f'hyperion-pre-patch-{instance_id}'},
+                                {'Key': 'InstanceId', 'Value': instance_id},
+                                {'Key': 'Environment', 'Value': environment},
+                                {'Key': 'Purpose', 'Value': 'pre-patch-backup'},
+                                {'Key': 'ManagedBy', 'Value': 'hyperion-fleet-manager'},
+                                {'Key': 'DeleteAfter', 'Value': delete_date.strftime('%Y-%m-%d')},
+                                {'Key': 'Project', 'Value': 'hyperion-fleet-manager'}
+                            ]
+                        }
+                    ]
+                )
+
+                snapshots.append({
+                    'InstanceId': instance_id,
+                    'SnapshotId': snapshot_response['SnapshotId'],
+                    'VolumeId': root_volume_id
+                })
+
+            return {
+                'SnapshotId': snapshots[0]['SnapshotId'] if len(snapshots) == 1 else 'MULTIPLE',
+                'Snapshots': snapshots,
+                'Message': f'Created {len(snapshots)} snapshot(s)'
+            }
+    outputs:
+      - Name: SnapshotId
+        Selector: $.Payload.SnapshotId
+        Type: String
+      - Name: Snapshots
+        Selector: $.Payload.Snapshots
+        Type: MapList
+
+  - name: WaitForSnapshot
+    action: aws:executeScript
+    description: Wait for EBS snapshot to complete.
+    timeoutSeconds: 1800
+    onFailure: Continue
+    inputs:
+      Runtime: python3.8
+      Handler: wait_snapshot
+      InputPayload:
+        Snapshots: "{{ CreateEBSSnapshot.Snapshots }}"
+      Script: |
+        import boto3
+        import time
+
+        def wait_snapshot(events, context):
+            snapshots = events.get('Snapshots', [])
+
+            if not snapshots or snapshots == 'SKIPPED':
+                return {'Status': 'SKIPPED'}
+
+            ec2 = boto3.client('ec2')
+            snapshot_ids = [s['SnapshotId'] for s in snapshots if s.get('SnapshotId')]
+
+            if not snapshot_ids:
+                return {'Status': 'NO_SNAPSHOTS'}
+
+            # Wait for all snapshots to complete
+            waiter = ec2.get_waiter('snapshot_completed')
+            try:
+                waiter.wait(
+                    SnapshotIds=snapshot_ids,
+                    WaiterConfig={'Delay': 30, 'MaxAttempts': 60}
+                )
+                return {'Status': 'COMPLETED', 'SnapshotIds': snapshot_ids}
+            except Exception as e:
+                return {'Status': 'TIMEOUT', 'Error': str(e), 'SnapshotIds': snapshot_ids}
+
+  - name: InstallPatches
+    action: aws:runCommand
+    description: Install Windows updates using specified classifications.
+    timeoutSeconds: 7200
+    maxAttempts: 1
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Install Windows Patches
+            $ErrorActionPreference = 'Stop'
+
+            $PatchClassifications = @('{{ PatchClassification }}')
+            $DryRun = '{{ DryRun }}'
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $PatchRoot = Join-Path $HyperionRoot 'Patching'
+            $LogPath = Join-Path $PatchRoot 'Logs'
+            $ReportsPath = Join-Path $PatchRoot 'Reports'
+
+            $LogFile = Join-Path $LogPath "patch-install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Installing Windows Patches ==="
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+                Write-Output "Classifications: $($PatchClassifications -join ', ')"
+                Write-Output "Dry Run: $DryRun"
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Initialize patch result
+                $PatchResult = @{
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                    StartTime = (Get-Date).ToString('o')
+                    DryRun = ($DryRun -eq 'true')
+                    Classifications = $PatchClassifications
+                    UpdatesSearched = 0
+                    UpdatesApplicable = 0
+                    UpdatesDownloaded = 0
+                    UpdatesInstalled = 0
+                    UpdatesFailed = 0
+                    RebootRequired = $false
+                    Updates = @()
+                    Errors = @()
+                }
+
+                # Create Windows Update session
+                Write-Output ""
+                Write-Output "Creating Windows Update session..."
+                $UpdateSession = New-Object -ComObject Microsoft.Update.Session
+                $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+
+                # Build search query based on classifications
+                $ClassificationMap = @{
+                    'CriticalUpdates' = 'e6cf1350-c01b-414d-a61f-263d14d133b4'
+                    'SecurityUpdates' = '0fa1201d-4330-4fa8-8ae9-b877473b6441'
+                    'UpdateRollups' = '28bc880e-0592-4cbf-8f95-c79b17911d5f'
+                    'Updates' = 'cd5ffd1e-e932-4e3a-bf74-18bf0b1bbd83'
+                    'DefinitionUpdates' = 'e0789628-ce08-4437-be74-2495b842f43b'
+                    'Drivers' = 'ebfc1fc5-71a4-4f7b-9aca-3b9a503104a0'
+                    'FeaturePacks' = 'b54e7d24-7add-428f-8b75-90a396fa584f'
+                    'ServicePacks' = '68c5b0a3-d1a6-4553-ae49-01d3a7827828'
+                }
+
+                # Search for updates
+                Write-Output "Searching for updates..."
+                $SearchQuery = "IsInstalled=0 and Type='Software'"
+                $SearchResult = $UpdateSearcher.Search($SearchQuery)
+
+                $PatchResult.UpdatesSearched = $SearchResult.Updates.Count
+                Write-Output "Found $($SearchResult.Updates.Count) available updates"
+
+                # Filter by classification
+                $ApplicableUpdates = New-Object -ComObject Microsoft.Update.UpdateColl
+                foreach ($Update in $SearchResult.Updates) {
+                    $UpdateCategories = $Update.Categories | ForEach-Object { $_.CategoryID }
+
+                    foreach ($Classification in $PatchClassifications) {
+                        $ClassificationId = $ClassificationMap[$Classification]
+                        if ($ClassificationId -and $UpdateCategories -contains $ClassificationId) {
+                            $ApplicableUpdates.Add($Update) | Out-Null
+                            break
+                        }
+                    }
+                }
+
+                $PatchResult.UpdatesApplicable = $ApplicableUpdates.Count
+                Write-Output "Applicable updates (matching classifications): $($ApplicableUpdates.Count)"
+
+                if ($ApplicableUpdates.Count -eq 0) {
+                    Write-Output "No applicable updates found"
+                    $PatchResult.Status = 'NoUpdatesAvailable'
+                } else {
+                    # Log applicable updates
+                    Write-Output ""
+                    Write-Output "=== Applicable Updates ==="
+                    foreach ($Update in $ApplicableUpdates) {
+                        $UpdateInfo = @{
+                            Title = $Update.Title
+                            KB = ($Update.KBArticleIDs | Select-Object -First 1)
+                            Severity = $Update.MsrcSeverity
+                            Size = [math]::Round($Update.MaxDownloadSize / 1MB, 2)
+                            RequiresReboot = $Update.RebootRequired
+                            Status = 'Pending'
+                        }
+                        $PatchResult.Updates += $UpdateInfo
+                        Write-Output "  - $($Update.Title) (KB$($UpdateInfo.KB)) - $($UpdateInfo.Size)MB"
+                    }
+
+                    if ($DryRun -eq 'true') {
+                        Write-Output ""
+                        Write-Output "DRY RUN MODE - Skipping installation"
+                        $PatchResult.Status = 'DryRunComplete'
+                        foreach ($UpdateInfo in $PatchResult.Updates) {
+                            $UpdateInfo.Status = 'DryRun'
+                        }
+                    } else {
+                        # Download updates
+                        Write-Output ""
+                        Write-Output "Downloading updates..."
+                        $UpdateDownloader = $UpdateSession.CreateUpdateDownloader()
+                        $UpdateDownloader.Updates = $ApplicableUpdates
+
+                        $DownloadResult = $UpdateDownloader.Download()
+                        $PatchResult.UpdatesDownloaded = ($ApplicableUpdates | Where-Object { $_.IsDownloaded }).Count
+                        Write-Output "Downloaded: $($PatchResult.UpdatesDownloaded) updates"
+
+                        # Install updates
+                        Write-Output ""
+                        Write-Output "Installing updates..."
+                        $UpdateInstaller = $UpdateSession.CreateUpdateInstaller()
+                        $UpdateInstaller.Updates = $ApplicableUpdates
+
+                        $InstallResult = $UpdateInstaller.Install()
+
+                        # Process results
+                        for ($i = 0; $i -lt $ApplicableUpdates.Count; $i++) {
+                            $Update = $ApplicableUpdates.Item($i)
+                            $Result = $InstallResult.GetUpdateResult($i)
+
+                            $StatusText = switch ($Result.ResultCode) {
+                                0 { 'NotStarted' }
+                                1 { 'InProgress' }
+                                2 { 'Succeeded' }
+                                3 { 'SucceededWithErrors' }
+                                4 { 'Failed' }
+                                5 { 'Aborted' }
+                                default { 'Unknown' }
+                            }
+
+                            # Update status in result
+                            $UpdateIndex = $PatchResult.Updates | Where-Object { $_.Title -eq $Update.Title }
+                            if ($UpdateIndex) {
+                                $UpdateIndex.Status = $StatusText
+                                $UpdateIndex.ResultCode = $Result.ResultCode
+                                $UpdateIndex.HResult = $Result.HResult
+                            }
+
+                            if ($Result.ResultCode -eq 2) {
+                                $PatchResult.UpdatesInstalled++
+                                Write-Output "  [SUCCESS] $($Update.Title)"
+                            } else {
+                                $PatchResult.UpdatesFailed++
+                                $PatchResult.Errors += "Failed: $($Update.Title) - HResult: $($Result.HResult)"
+                                Write-Output "  [FAILED] $($Update.Title) - $StatusText"
+                            }
+
+                            if ($Update.RebootRequired -or $Result.RebootRequired) {
+                                $PatchResult.RebootRequired = $true
+                            }
+                        }
+
+                        $PatchResult.Status = if ($PatchResult.UpdatesFailed -eq 0) { 'Success' } else { 'PartialSuccess' }
+                    }
+                }
+
+                $PatchResult.EndTime = (Get-Date).ToString('o')
+
+                # Save patch result
+                $PatchResultFile = Join-Path $ReportsPath 'patch-result.json'
+                $PatchResult | ConvertTo-Json -Depth 10 | Set-Content -Path $PatchResultFile
+
+                Write-Output ""
+                Write-Output "=== Patch Installation Summary ==="
+                Write-Output "Status: $($PatchResult.Status)"
+                Write-Output "Updates Installed: $($PatchResult.UpdatesInstalled)"
+                Write-Output "Updates Failed: $($PatchResult.UpdatesFailed)"
+                Write-Output "Reboot Required: $($PatchResult.RebootRequired)"
+
+                Write-Output ""
+                Write-Output "PATCH_STATUS=$($PatchResult.Status)"
+                Write-Output "UPDATES_INSTALLED=$($PatchResult.UpdatesInstalled)"
+                Write-Output "REBOOT_REQUIRED=$($PatchResult.RebootRequired)"
+
+            } catch {
+                Write-Error "Patch installation failed: $_"
+                $PatchResult.Status = 'Failed'
+                $PatchResult.Errors += $_.Exception.Message
+                $PatchResult | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $ReportsPath 'patch-result.json')
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: HandleReboot
+    action: aws:runCommand
+    description: Handle reboot based on RebootOption parameter.
+    timeoutSeconds: 300
+    maxAttempts: 1
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Handle Reboot
+            $ErrorActionPreference = 'Stop'
+
+            $RebootOption = '{{ RebootOption }}'
+            $ScheduledTime = '{{ ScheduledRebootTime }}'
+            $DryRun = '{{ DryRun }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $PatchRoot = Join-Path $HyperionRoot 'Patching'
+            $ReportsPath = Join-Path $PatchRoot 'Reports'
+            $LogPath = Join-Path $PatchRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "reboot-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Handling Reboot ==="
+                Write-Output "Reboot Option: $RebootOption"
+
+                # Load patch result
+                $PatchResultFile = Join-Path $ReportsPath 'patch-result.json'
+                $PatchResult = Get-Content $PatchResultFile | ConvertFrom-Json
+
+                if ($DryRun -eq 'true') {
+                    Write-Output "Dry run mode - skipping reboot handling"
+                    Write-Output "REBOOT_ACTION=DryRun"
+                    exit 0
+                }
+
+                if (-not $PatchResult.RebootRequired) {
+                    Write-Output "No reboot required"
+                    Write-Output "REBOOT_ACTION=NotRequired"
+                    exit 0
+                }
+
+                switch ($RebootOption) {
+                    'NoReboot' {
+                        Write-Output "Reboot suppressed by NoReboot option"
+                        Write-Output "WARNING: System requires reboot to complete patching"
+                        Write-Output "REBOOT_ACTION=Suppressed"
+                    }
+                    'ScheduleReboot' {
+                        Write-Output "Scheduling reboot for $ScheduledTime UTC"
+
+                        # Parse scheduled time
+                        $Now = [DateTime]::UtcNow
+                        $TimeParts = $ScheduledTime.Split(':')
+                        $ScheduledDateTime = $Now.Date.AddHours([int]$TimeParts[0]).AddMinutes([int]$TimeParts[1])
+
+                        # If time has passed today, schedule for tomorrow
+                        if ($ScheduledDateTime -lt $Now) {
+                            $ScheduledDateTime = $ScheduledDateTime.AddDays(1)
+                        }
+
+                        $SecondsUntilReboot = [int]($ScheduledDateTime - $Now).TotalSeconds
+
+                        # Schedule shutdown
+                        shutdown /r /t $SecondsUntilReboot /c "Hyperion Fleet Manager - Scheduled post-patch reboot" /f
+
+                        Write-Output "Reboot scheduled for: $ScheduledDateTime UTC"
+                        Write-Output "Seconds until reboot: $SecondsUntilReboot"
+                        Write-Output "REBOOT_ACTION=Scheduled"
+                        Write-Output "REBOOT_TIME=$ScheduledDateTime"
+                    }
+                    'RebootIfNeeded' {
+                        Write-Output "Initiating immediate reboot..."
+                        Write-Output "REBOOT_ACTION=Immediate"
+
+                        # Give SSM time to capture output
+                        Start-Sleep -Seconds 5
+
+                        Restart-Computer -Force
+                    }
+                    default {
+                        Write-Output "Unknown reboot option: $RebootOption"
+                        Write-Output "REBOOT_ACTION=Unknown"
+                    }
+                }
+
+            } catch {
+                Write-Error "Reboot handling failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+
+  - name: WaitForReboot
+    action: aws:sleep
+    description: Wait for instance to reboot and come back online.
+    inputs:
+      Duration: PT3M
+
+  - name: PostPatchValidation
+    action: aws:runCommand
+    description: Validate system health after patching.
+    timeoutSeconds: 600
+    maxAttempts: 3
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Post-Patch Validation
+            $ErrorActionPreference = 'Stop'
+
+            $Environment = '{{ Environment }}'
+            $DryRun = '{{ DryRun }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $PatchRoot = Join-Path $HyperionRoot 'Patching'
+            $LogPath = Join-Path $PatchRoot 'Logs'
+            $ReportsPath = Join-Path $PatchRoot 'Reports'
+
+            $LogFile = Join-Path $LogPath "post-patch-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Post-Patch Validation ==="
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                $Validation = @{
+                    InstanceId = $InstanceId
+                    Timestamp = (Get-Date).ToString('o')
+                    Environment = $Environment
+                    Checks = @{}
+                    OverallStatus = 'Healthy'
+                    Issues = @()
+                }
+
+                # Check 1: System Boot
+                Write-Output ""
+                Write-Output "Checking system boot status..."
+                $OS = Get-CimInstance -ClassName Win32_OperatingSystem
+                $LastBoot = $OS.LastBootUpTime
+                $Uptime = (Get-Date) - $LastBoot
+
+                $Validation.Checks.SystemBoot = @{
+                    LastBootTime = $LastBoot.ToString('o')
+                    UptimeMinutes = [math]::Round($Uptime.TotalMinutes, 2)
+                    Status = 'Pass'
+                }
+                Write-Output "  Last boot: $LastBoot"
+                Write-Output "  Uptime: $([math]::Round($Uptime.TotalMinutes, 2)) minutes"
+
+                # Check 2: Critical Services
+                Write-Output ""
+                Write-Output "Checking critical services..."
+                $CriticalServices = @('W32Time', 'Winmgmt', 'EventLog', 'BITS', 'wuauserv', 'AmazonSSMAgent')
+                $ServiceResults = @{}
+                $ServiceIssues = 0
+
+                foreach ($ServiceName in $CriticalServices) {
+                    $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+                    if ($Service) {
+                        $ServiceResults[$ServiceName] = @{
+                            Status = $Service.Status.ToString()
+                            Expected = 'Running'
+                        }
+                        if ($Service.Status -ne 'Running') {
+                            $ServiceIssues++
+                            $Validation.Issues += "Service $ServiceName is not running"
+                            Write-Output "  [WARN] $ServiceName - $($Service.Status)"
+                        } else {
+                            Write-Output "  [OK] $ServiceName - Running"
+                        }
+                    } else {
+                        Write-Output "  [SKIP] $ServiceName - Not found"
+                    }
+                }
+
+                $Validation.Checks.CriticalServices = @{
+                    Services = $ServiceResults
+                    Issues = $ServiceIssues
+                    Status = if ($ServiceIssues -eq 0) { 'Pass' } else { 'Warning' }
+                }
+
+                # Check 3: Windows Update Status
+                Write-Output ""
+                Write-Output "Checking Windows Update status..."
+                try {
+                    $UpdateSession = New-Object -ComObject Microsoft.Update.Session
+                    $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+
+                    # Check for any remaining critical/security updates
+                    $SearchResult = $UpdateSearcher.Search("IsInstalled=0 and Type='Software'")
+                    $RemainingUpdates = $SearchResult.Updates.Count
+
+                    $Validation.Checks.WindowsUpdate = @{
+                        RemainingUpdates = $RemainingUpdates
+                        Status = if ($RemainingUpdates -le 5) { 'Pass' } else { 'Warning' }
+                    }
+                    Write-Output "  Remaining updates: $RemainingUpdates"
+                } catch {
+                    $Validation.Checks.WindowsUpdate = @{
+                        Error = $_.Exception.Message
+                        Status = 'Error'
+                    }
+                    Write-Output "  [ERROR] Could not check Windows Update: $_"
+                }
+
+                # Check 4: Event Log Errors
+                Write-Output ""
+                Write-Output "Checking recent event log errors..."
+                $RecentErrors = Get-WinEvent -FilterHashtable @{
+                    LogName = 'System'
+                    Level = 2  # Error
+                    StartTime = (Get-Date).AddHours(-1)
+                } -MaxEvents 10 -ErrorAction SilentlyContinue
+
+                $Validation.Checks.EventLogErrors = @{
+                    RecentErrorCount = if ($RecentErrors) { $RecentErrors.Count } else { 0 }
+                    Status = if (-not $RecentErrors -or $RecentErrors.Count -lt 5) { 'Pass' } else { 'Warning' }
+                }
+
+                if ($RecentErrors -and $RecentErrors.Count -gt 0) {
+                    Write-Output "  Recent errors: $($RecentErrors.Count)"
+                    $RecentErrors | Select-Object -First 3 | ForEach-Object {
+                        Write-Output "    - $($_.Message.Substring(0, [Math]::Min(100, $_.Message.Length)))..."
+                    }
+                } else {
+                    Write-Output "  No recent errors"
+                }
+
+                # Check 5: Network Connectivity
+                Write-Output ""
+                Write-Output "Checking network connectivity..."
+                $NetworkTests = @(
+                    @{ Name = 'Metadata Service'; Target = '169.254.169.254' }
+                    @{ Name = 'SSM Endpoint'; Target = 'ssm.amazonaws.com' }
+                )
+
+                $NetworkResults = @{}
+                foreach ($Test in $NetworkTests) {
+                    $TestResult = Test-NetConnection -ComputerName $Test.Target -Port 443 -WarningAction SilentlyContinue
+                    $NetworkResults[$Test.Name] = @{
+                        Target = $Test.Target
+                        Reachable = $TestResult.TcpTestSucceeded
+                    }
+                    $Status = if ($TestResult.TcpTestSucceeded) { 'OK' } else { 'FAIL' }
+                    Write-Output "  [$Status] $($Test.Name)"
+
+                    if (-not $TestResult.TcpTestSucceeded) {
+                        $Validation.Issues += "Network connectivity issue: $($Test.Name)"
+                    }
+                }
+
+                $Validation.Checks.NetworkConnectivity = @{
+                    Tests = $NetworkResults
+                    Status = if ($Validation.Issues | Where-Object { $_ -like '*Network*' }) { 'Warning' } else { 'Pass' }
+                }
+
+                # Check 6: Disk Space
+                Write-Output ""
+                Write-Output "Checking disk space..."
+                $SystemDrive = Get-PSDrive -Name C
+                $FreeSpaceGB = [math]::Round($SystemDrive.Free / 1GB, 2)
+
+                $Validation.Checks.DiskSpace = @{
+                    FreeSpaceGB = $FreeSpaceGB
+                    Status = if ($FreeSpaceGB -ge 5) { 'Pass' } else { 'Warning' }
+                }
+                Write-Output "  Free space: ${FreeSpaceGB}GB"
+
+                if ($FreeSpaceGB -lt 5) {
+                    $Validation.Issues += "Low disk space after patching: ${FreeSpaceGB}GB"
+                }
+
+                # Determine overall status
+                if ($Validation.Issues.Count -gt 0) {
+                    $Validation.OverallStatus = 'Warning'
+                }
+
+                # Save validation result
+                $ValidationFile = Join-Path $ReportsPath 'post-patch-validation.json'
+                $Validation | ConvertTo-Json -Depth 10 | Set-Content -Path $ValidationFile
+
+                Write-Output ""
+                Write-Output "=== Post-Patch Validation Summary ==="
+                Write-Output "Overall Status: $($Validation.OverallStatus)"
+                Write-Output "Issues Found: $($Validation.Issues.Count)"
+
+                if ($Validation.Issues.Count -gt 0) {
+                    Write-Output ""
+                    Write-Output "Issues:"
+                    $Validation.Issues | ForEach-Object { Write-Output "  - $_" }
+                }
+
+                Write-Output ""
+                Write-Output "VALIDATION_STATUS=$($Validation.OverallStatus)"
+
+            } catch {
+                Write-Error "Post-patch validation failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: ReportResults
+    action: aws:runCommand
+    description: Generate final patching report and publish metrics.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Report Patch Results
+            $ErrorActionPreference = 'Stop'
+
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $PatchRoot = Join-Path $HyperionRoot 'Patching'
+            $LogPath = Join-Path $PatchRoot 'Logs'
+            $ReportsPath = Join-Path $PatchRoot 'Reports'
+
+            $LogFile = Join-Path $LogPath "report-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Generating Patch Report ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+
+                # Load all reports
+                $PatchResult = Get-Content (Join-Path $ReportsPath 'patch-result.json') -ErrorAction SilentlyContinue | ConvertFrom-Json
+                $PreHealthCheck = Get-Content (Join-Path $ReportsPath 'pre-patch-health.json') -ErrorAction SilentlyContinue | ConvertFrom-Json
+                $PostValidation = Get-Content (Join-Path $ReportsPath 'post-patch-validation.json') -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+                # Generate final report
+                $FinalReport = @{
+                    ReportId = [guid]::NewGuid().ToString()
+                    GeneratedAt = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                    PatchSummary = @{
+                        Status = $PatchResult.Status
+                        UpdatesInstalled = $PatchResult.UpdatesInstalled
+                        UpdatesFailed = $PatchResult.UpdatesFailed
+                        RebootRequired = $PatchResult.RebootRequired
+                        Classifications = $PatchResult.Classifications
+                    }
+                    PrePatchHealth = @{
+                        Status = $PreHealthCheck.OverallStatus
+                        DiskSpaceGB = $PreHealthCheck.Checks.DiskSpace.FreeSpaceGB
+                    }
+                    PostPatchValidation = @{
+                        Status = $PostValidation.OverallStatus
+                        IssueCount = $PostValidation.Issues.Count
+                    }
+                    Updates = $PatchResult.Updates
+                }
+
+                # Save final report
+                $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                $FinalReportFile = Join-Path $ReportsPath "patch-report-$InstanceId-$Timestamp.json"
+                $FinalReport | ConvertTo-Json -Depth 10 | Set-Content -Path $FinalReportFile
+
+                # Publish CloudWatch metrics
+                Write-Output ""
+                Write-Output "Publishing CloudWatch metrics..."
+
+                $Namespace = 'HyperionFleet/Patching'
+                $Dimensions = @(
+                    @{ Name = 'InstanceId'; Value = $InstanceId }
+                    @{ Name = 'Environment'; Value = $Environment }
+                )
+
+                $Metrics = @(
+                    @{
+                        MetricName = 'UpdatesInstalled'
+                        Value = $PatchResult.UpdatesInstalled
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                    @{
+                        MetricName = 'UpdatesFailed'
+                        Value = $PatchResult.UpdatesFailed
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                    @{
+                        MetricName = 'PatchSuccess'
+                        Value = if ($PatchResult.Status -eq 'Success') { 1 } else { 0 }
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                )
+
+                foreach ($Metric in $Metrics) {
+                    try {
+                        Write-CloudWatchMetricData -Namespace $Namespace -MetricData $Metric -Region $Region
+                        Write-Output "  Published: $($Metric.MetricName) = $($Metric.Value)"
+                    } catch {
+                        Write-Warning "  Failed to publish $($Metric.MetricName): $_"
+                    }
+                }
+
+                Write-Output ""
+                Write-Output "=== Patch Report Complete ==="
+                Write-Output "Instance: $InstanceId"
+                Write-Output "Status: $($PatchResult.Status)"
+                Write-Output "Updates Installed: $($PatchResult.UpdatesInstalled)"
+                Write-Output "Report: $FinalReportFile"
+
+            } catch {
+                Write-Error "Report generation failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String

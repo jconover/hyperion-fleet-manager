@@ -1,0 +1,369 @@
+---
+# Hyperion Fleet Manager - Inventory Collection State Manager Association
+# This association ensures daily inventory collection on target instances
+#
+# Deploy this association to automatically collect and upload system
+# inventory data from your Windows fleet for centralized management.
+
+# Association metadata
+AssociationName: HyperionFleet-Inventory-Daily
+AssociationDescription: |
+  Hyperion Fleet Manager automated inventory collection.
+  Runs daily to collect comprehensive system information including:
+  - System specifications (CPU, memory, disk, network)
+  - Installed software and hotfixes
+  - Windows features
+  - Running services
+  - Security configuration
+  Reports to SSM Inventory and optionally uploads to S3.
+
+# Document to execute
+DocumentName: HyperionFleet-CollectInventory
+
+# Target selection using tags
+Targets:
+  - Key: tag:ManagedBy
+    Values:
+      - hyperion-fleet-manager
+
+# Alternative: Target all managed instances
+# Targets:
+#   - Key: InstanceIds
+#     Values:
+#       - "*"
+
+# Alternative: Target by platform
+# Targets:
+#   - Key: tag:Platform
+#     Values:
+#       - Windows
+
+# Schedule expression (daily at 4 AM UTC)
+ScheduleExpression: "cron(0 4 * * ? *)"
+
+# Alternative schedule expressions:
+# - Every 12 hours: "rate(12 hours)"
+# - Twice daily: "cron(0 4,16 * * ? *)"
+# - Weekly on Sunday: "cron(0 4 ? * SUN *)"
+# - First day of month: "cron(0 4 1 * ? *)"
+
+# Parameters for the document
+Parameters:
+  InventoryTypes:
+    - "All"
+  UploadToS3:
+    - "true"
+  S3BucketName:
+    - "{{ ssm:/hyperion-fleet/inventory-bucket }}"
+  S3KeyPrefix:
+    - "inventory"
+  Environment:
+    - "{{ ssm:/hyperion-fleet/environment }}"
+  # Note: TargetInstances is handled by the Targets section
+
+# Execution controls
+MaxConcurrency: "50%"
+MaxErrors: "25%"
+
+# Compliance severity for SSM Compliance
+ComplianceSeverity: LOW
+
+# Sync compliance data to S3
+SyncCompliance: AUTO
+
+# Output location for detailed logs
+OutputLocation:
+  S3Location:
+    OutputS3Region: "{{ ssm:/hyperion-fleet/region }}"
+    OutputS3BucketName: "{{ ssm:/hyperion-fleet/logs-bucket }}"
+    OutputS3KeyPrefix: "ssm/inventory-collection"
+
+# Apply association only at scheduled time (not immediately on creation)
+ApplyOnlyAtCronInterval: true
+WaitForSuccessTimeoutSeconds: 1200
+
+---
+# Terraform resource example for deploying this association
+# terraform_resource: |
+#   resource "aws_ssm_association" "inventory_daily" {
+#     name = "HyperionFleet-CollectInventory"
+#
+#     association_name = "HyperionFleet-Inventory-Daily"
+#
+#     targets {
+#       key    = "tag:ManagedBy"
+#       values = ["hyperion-fleet-manager"]
+#     }
+#
+#     schedule_expression = "cron(0 4 * * ? *)"
+#
+#     parameters = {
+#       InventoryTypes = "All"
+#       UploadToS3     = "true"
+#       S3BucketName   = var.inventory_bucket
+#       S3KeyPrefix    = "inventory"
+#       Environment    = var.environment
+#     }
+#
+#     max_concurrency = "50%"
+#     max_errors      = "25%"
+#
+#     compliance_severity = "LOW"
+#
+#     output_location {
+#       s3_bucket_name = var.logs_bucket
+#       s3_key_prefix  = "ssm/inventory-collection"
+#       s3_region      = var.region
+#     }
+#
+#     apply_only_at_cron_interval = true
+#
+#     tags = {
+#       Name        = "hyperion-inventory-collection"
+#       Environment = var.environment
+#       ManagedBy   = "terraform"
+#       Project     = "hyperion-fleet-manager"
+#     }
+#   }
+
+---
+# AWS CLI deployment example
+# aws_cli_deployment: |
+#   aws ssm create-association \
+#     --name "HyperionFleet-CollectInventory" \
+#     --association-name "HyperionFleet-Inventory-Daily" \
+#     --targets "Key=tag:ManagedBy,Values=hyperion-fleet-manager" \
+#     --schedule-expression "cron(0 4 * * ? *)" \
+#     --parameters "InventoryTypes=All,UploadToS3=true,S3BucketName=my-inventory-bucket,S3KeyPrefix=inventory,Environment=dev" \
+#     --max-concurrency "50%" \
+#     --max-errors "25%" \
+#     --compliance-severity "LOW" \
+#     --apply-only-at-cron-interval \
+#     --output-location "S3Location={OutputS3Region=us-east-1,OutputS3BucketName=my-logs-bucket,OutputS3KeyPrefix=ssm/inventory-collection}"
+
+---
+# AWS Inventory configuration for built-in collection
+# This can be used alongside custom inventory collection
+# builtin_inventory_association: |
+#   resource "aws_ssm_association" "aws_inventory" {
+#     name = "AWS-GatherSoftwareInventory"
+#
+#     association_name = "HyperionFleet-AWS-Inventory"
+#
+#     targets {
+#       key    = "tag:ManagedBy"
+#       values = ["hyperion-fleet-manager"]
+#     }
+#
+#     schedule_expression = "rate(12 hours)"
+#
+#     parameters = {
+#       applications                = "Enabled"
+#       awsComponents               = "Enabled"
+#       networkConfig               = "Enabled"
+#       windowsUpdates              = "Enabled"
+#       instanceDetailedInformation = "Enabled"
+#       services                    = "Enabled"
+#       windowsRegistry             = "Enabled"
+#       windowsRoles                = "Enabled"
+#       customInventory             = "Enabled"
+#       billingInfo                 = "Enabled"
+#     }
+#
+#     tags = {
+#       Name        = "hyperion-aws-inventory"
+#       Environment = var.environment
+#       ManagedBy   = "terraform"
+#       Project     = "hyperion-fleet-manager"
+#     }
+#   }
+
+---
+# S3 bucket configuration for inventory storage
+# s3_bucket_config: |
+#   resource "aws_s3_bucket" "inventory" {
+#     bucket = "hyperion-fleet-inventory-${var.environment}"
+#
+#     tags = {
+#       Name        = "hyperion-fleet-inventory"
+#       Environment = var.environment
+#       ManagedBy   = "terraform"
+#       Project     = "hyperion-fleet-manager"
+#     }
+#   }
+#
+#   resource "aws_s3_bucket_versioning" "inventory" {
+#     bucket = aws_s3_bucket.inventory.id
+#     versioning_configuration {
+#       status = "Enabled"
+#     }
+#   }
+#
+#   resource "aws_s3_bucket_lifecycle_configuration" "inventory" {
+#     bucket = aws_s3_bucket.inventory.id
+#
+#     rule {
+#       id     = "archive-old-inventory"
+#       status = "Enabled"
+#
+#       filter {
+#         prefix = "inventory/"
+#       }
+#
+#       transition {
+#         days          = 30
+#         storage_class = "STANDARD_IA"
+#       }
+#
+#       transition {
+#         days          = 90
+#         storage_class = "GLACIER"
+#       }
+#
+#       expiration {
+#         days = 365
+#       }
+#     }
+#   }
+#
+#   resource "aws_s3_bucket_server_side_encryption_configuration" "inventory" {
+#     bucket = aws_s3_bucket.inventory.id
+#
+#     rule {
+#       apply_server_side_encryption_by_default {
+#         sse_algorithm = "aws:kms"
+#       }
+#     }
+#   }
+
+---
+# Athena integration for inventory analytics
+# athena_config: |
+#   resource "aws_glue_catalog_database" "inventory" {
+#     name = "hyperion_fleet_inventory"
+#   }
+#
+#   resource "aws_glue_catalog_table" "inventory" {
+#     name          = "combined_inventory"
+#     database_name = aws_glue_catalog_database.inventory.name
+#
+#     table_type = "EXTERNAL_TABLE"
+#
+#     parameters = {
+#       EXTERNAL              = "TRUE"
+#       "parquet.compression" = "SNAPPY"
+#     }
+#
+#     storage_descriptor {
+#       location      = "s3://${aws_s3_bucket.inventory.bucket}/inventory/"
+#       input_format  = "org.apache.hadoop.mapred.TextInputFormat"
+#       output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+#
+#       ser_de_info {
+#         serialization_library = "org.openx.data.jsonserde.JsonSerDe"
+#       }
+#
+#       columns {
+#         name = "InstanceId"
+#         type = "string"
+#       }
+#       columns {
+#         name = "Environment"
+#         type = "string"
+#       }
+#       columns {
+#         name = "CollectionTimestamp"
+#         type = "string"
+#       }
+#       columns {
+#         name = "System"
+#         type = "struct<AWS:struct<InstanceType:string>,OperatingSystem:struct<Caption:string,Version:string>>"
+#       }
+#     }
+#   }
+
+---
+# CloudWatch Dashboard for inventory metrics
+# cloudwatch_dashboard: |
+#   resource "aws_cloudwatch_dashboard" "inventory" {
+#     dashboard_name = "HyperionFleet-Inventory"
+#
+#     dashboard_body = jsonencode({
+#       widgets = [
+#         {
+#           type   = "metric"
+#           x      = 0
+#           y      = 0
+#           width  = 12
+#           height = 6
+#           properties = {
+#             title  = "Total Installed Applications by Instance"
+#             region = var.region
+#             metrics = [
+#               ["HyperionFleet/Inventory", "TotalApplications", "Environment", var.environment]
+#             ]
+#             stat   = "Average"
+#             period = 86400
+#           }
+#         },
+#         {
+#           type   = "metric"
+#           x      = 12
+#           y      = 0
+#           width  = 12
+#           height = 6
+#           properties = {
+#             title  = "Total Services by Instance"
+#             region = var.region
+#             metrics = [
+#               ["HyperionFleet/Inventory", "TotalServices", "Environment", var.environment]
+#             ]
+#             stat   = "Average"
+#             period = 86400
+#           }
+#         }
+#       ]
+#     })
+#   }
+
+---
+# IAM role requirements for this association
+# iam_requirements: |
+#   The automation assume role needs the following permissions:
+#
+#   - ssm:SendCommand
+#   - ssm:ListCommands
+#   - ssm:ListCommandInvocations
+#   - ssm:PutInventory
+#   - s3:PutObject (for inventory bucket)
+#   - s3:PutObject (for logs bucket)
+#
+#   Instances need these permissions via their instance profile:
+#
+#   - ssm:PutInventory
+#   - s3:PutObject
+#
+#   Example IAM policy for instances:
+#   {
+#     "Version": "2012-10-17",
+#     "Statement": [
+#       {
+#         "Effect": "Allow",
+#         "Action": [
+#           "ssm:PutInventory",
+#           "ssm:GetCommandInvocation"
+#         ],
+#         "Resource": "*"
+#       },
+#       {
+#         "Effect": "Allow",
+#         "Action": [
+#           "s3:PutObject"
+#         ],
+#         "Resource": [
+#           "arn:aws:s3:::inventory-bucket/*",
+#           "arn:aws:s3:::logs-bucket/*"
+#         ]
+#       }
+#     ]
+#   }

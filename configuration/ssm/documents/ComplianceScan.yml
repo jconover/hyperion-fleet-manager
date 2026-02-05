@@ -1,0 +1,1075 @@
+---
+# Hyperion Fleet Manager - Compliance Scan
+# SSM Automation Document for running compliance scans and reporting results
+#
+# This document runs DSC compliance tests, collects CIS benchmark results,
+# generates reports, and uploads them to S3 with CloudWatch metrics.
+
+schemaVersion: "0.3"
+description: |
+  Run comprehensive compliance scan on target Windows instances.
+  Tests DSC configuration compliance, collects CIS benchmark results,
+  generates detailed JSON reports, uploads to S3, and publishes metrics to CloudWatch.
+
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: "(Required) The ARN of the IAM role that allows Automation to perform actions on your behalf."
+    default: ""
+
+  BucketName:
+    type: String
+    description: "(Required) S3 bucket name for storing compliance reports."
+    allowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+
+  ReportPrefix:
+    type: String
+    description: "(Optional) S3 key prefix for compliance reports."
+    default: "compliance-reports"
+
+  TargetInstances:
+    type: StringList
+    description: "(Required) List of target instance IDs to scan."
+
+  Environment:
+    type: String
+    description: "(Required) Environment identifier for the scan."
+    allowedValues:
+      - dev
+      - staging
+      - prod
+    default: "dev"
+
+  ScanType:
+    type: String
+    description: "(Optional) Type of compliance scan to run."
+    allowedValues:
+      - Full
+      - DSCOnly
+      - CISOnly
+      - SecurityOnly
+    default: "Full"
+
+  CISBenchmarkLevel:
+    type: String
+    description: "(Optional) CIS Benchmark level to validate against."
+    allowedValues:
+      - Level1
+      - Level2
+    default: "Level1"
+
+  IncludeRemediationPlan:
+    type: String
+    description: "(Optional) Include remediation recommendations in report."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "true"
+
+  MaxConcurrency:
+    type: String
+    description: "(Optional) Maximum concurrent instances to scan."
+    default: "25"
+
+  MaxErrors:
+    type: String
+    description: "(Optional) Maximum errors before stopping automation."
+    default: "10"
+
+outputs:
+  - RunDSCCompliance.Output
+  - CollectCISResults.Output
+  - GenerateReport.Output
+  - UploadToS3.Output
+  - PublishMetrics.Output
+
+mainSteps:
+  - name: RunDSCCompliance
+    action: aws:runCommand
+    description: Run DSC compliance test using Test-DscConfiguration.
+    timeoutSeconds: 900
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - DSC Compliance Test
+            $ErrorActionPreference = 'Stop'
+
+            $ScanType = '{{ ScanType }}'
+            $Environment = '{{ Environment }}'
+
+            # Setup paths
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ComplianceRoot = Join-Path $HyperionRoot 'Compliance'
+            $ReportsPath = Join-Path $ComplianceRoot 'Reports'
+            $LogPath = Join-Path $ComplianceRoot 'Logs'
+
+            @($ComplianceRoot, $ReportsPath, $LogPath) | ForEach-Object {
+                if (-not (Test-Path $_)) {
+                    New-Item -Path $_ -ItemType Directory -Force | Out-Null
+                }
+            }
+
+            $LogFile = Join-Path $LogPath "dsc-compliance-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== DSC Compliance Scan ==="
+                Write-Output "Scan Type: $ScanType"
+                Write-Output "Environment: $Environment"
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+
+                if ($ScanType -eq 'CISOnly') {
+                    Write-Output "Skipping DSC compliance (CISOnly mode)"
+                    $DSCResult = @{
+                        Skipped = $true
+                        Reason = 'CISOnly scan mode'
+                    }
+                } else {
+                    # Check if DSC configuration is applied
+                    $CurrentConfig = Get-DscConfiguration -ErrorAction SilentlyContinue
+
+                    if (-not $CurrentConfig) {
+                        Write-Output "No DSC configuration applied to this instance"
+                        $DSCResult = @{
+                            InDesiredState = $null
+                            ConfigurationApplied = $false
+                            Message = 'No DSC configuration applied'
+                            ResourcesInDesiredState = @()
+                            ResourcesNotInDesiredState = @()
+                        }
+                    } else {
+                        Write-Output "Running Test-DscConfiguration..."
+                        $TestResult = Test-DscConfiguration -Detailed
+
+                        $DSCResult = @{
+                            InDesiredState = $TestResult.InDesiredState
+                            ConfigurationApplied = $true
+                            TotalResources = $TestResult.ResourcesInDesiredState.Count + $TestResult.ResourcesNotInDesiredState.Count
+                            CompliantResources = $TestResult.ResourcesInDesiredState.Count
+                            NonCompliantResources = $TestResult.ResourcesNotInDesiredState.Count
+                            CompliancePercentage = 0
+                            ResourcesInDesiredState = @()
+                            ResourcesNotInDesiredState = @()
+                        }
+
+                        if ($DSCResult.TotalResources -gt 0) {
+                            $DSCResult.CompliancePercentage = [math]::Round(
+                                ($DSCResult.CompliantResources / $DSCResult.TotalResources) * 100, 2
+                            )
+                        }
+
+                        # Capture resource details
+                        foreach ($Resource in $TestResult.ResourcesInDesiredState) {
+                            $DSCResult.ResourcesInDesiredState += @{
+                                ResourceId = $Resource.ResourceId
+                                ResourceType = $Resource.ResourceName
+                                InDesiredState = $true
+                            }
+                        }
+
+                        foreach ($Resource in $TestResult.ResourcesNotInDesiredState) {
+                            $DSCResult.ResourcesNotInDesiredState += @{
+                                ResourceId = $Resource.ResourceId
+                                ResourceType = $Resource.ResourceName
+                                InDesiredState = $false
+                                DesiredState = $Resource.DesiredState
+                                ActualState = $Resource.ActualState
+                            }
+                        }
+
+                        Write-Output "DSC Compliance: $($DSCResult.CompliancePercentage)%"
+                        Write-Output "Compliant: $($DSCResult.CompliantResources)/$($DSCResult.TotalResources)"
+                    }
+                }
+
+                # Save intermediate result
+                $DSCResultFile = Join-Path $ReportsPath 'dsc-result.json'
+                $DSCResult | ConvertTo-Json -Depth 10 | Set-Content -Path $DSCResultFile
+                Write-Output "DSC result saved: $DSCResultFile"
+
+            } catch {
+                Write-Error "DSC compliance scan failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: CollectCISResults
+    action: aws:runCommand
+    description: Collect CIS benchmark compliance results.
+    timeoutSeconds: 1200
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - CIS Benchmark Compliance Check
+            $ErrorActionPreference = 'Stop'
+
+            $ScanType = '{{ ScanType }}'
+            $CISLevel = '{{ CISBenchmarkLevel }}'
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ComplianceRoot = Join-Path $HyperionRoot 'Compliance'
+            $ReportsPath = Join-Path $ComplianceRoot 'Reports'
+            $LogPath = Join-Path $ComplianceRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "cis-compliance-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== CIS Benchmark Compliance Scan ==="
+                Write-Output "CIS Level: $CISLevel"
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+
+                if ($ScanType -eq 'DSCOnly') {
+                    Write-Output "Skipping CIS compliance (DSCOnly mode)"
+                    $CISResult = @{
+                        Skipped = $true
+                        Reason = 'DSCOnly scan mode'
+                    }
+                } else {
+                    # Initialize CIS results
+                    $CISResult = @{
+                        BenchmarkLevel = $CISLevel
+                        ScanTimestamp = (Get-Date).ToString('o')
+                        TotalControls = 0
+                        PassedControls = 0
+                        FailedControls = 0
+                        NotApplicable = 0
+                        CompliancePercentage = 0
+                        Categories = @{}
+                        ControlResults = @()
+                    }
+
+                    # Define CIS checks by category
+                    $CISChecks = @{
+                        'AccountPolicies' = @(
+                            @{
+                                Id = '1.1.1'
+                                Name = 'Enforce password history'
+                                Level = 'Level1'
+                                Check = {
+                                    $Policy = (net accounts | Select-String 'Password history').ToString()
+                                    $Value = [int]($Policy -replace '\D', '')
+                                    @{ Pass = $Value -ge 24; ActualValue = $Value; ExpectedValue = '>=24' }
+                                }
+                            }
+                            @{
+                                Id = '1.1.2'
+                                Name = 'Maximum password age'
+                                Level = 'Level1'
+                                Check = {
+                                    $Policy = (net accounts | Select-String 'Maximum password age').ToString()
+                                    $Value = [int]($Policy -replace '\D', '')
+                                    @{ Pass = $Value -le 365 -and $Value -gt 0; ActualValue = $Value; ExpectedValue = '1-365' }
+                                }
+                            }
+                            @{
+                                Id = '1.1.3'
+                                Name = 'Minimum password age'
+                                Level = 'Level1'
+                                Check = {
+                                    $Policy = (net accounts | Select-String 'Minimum password age').ToString()
+                                    $Value = [int]($Policy -replace '\D', '')
+                                    @{ Pass = $Value -ge 1; ActualValue = $Value; ExpectedValue = '>=1' }
+                                }
+                            }
+                            @{
+                                Id = '1.1.4'
+                                Name = 'Minimum password length'
+                                Level = 'Level1'
+                                Check = {
+                                    $Policy = (net accounts | Select-String 'Minimum password length').ToString()
+                                    $Value = [int]($Policy -replace '\D', '')
+                                    @{ Pass = $Value -ge 14; ActualValue = $Value; ExpectedValue = '>=14' }
+                                }
+                            }
+                            @{
+                                Id = '1.2.1'
+                                Name = 'Account lockout duration'
+                                Level = 'Level1'
+                                Check = {
+                                    $Policy = (net accounts | Select-String 'Lockout duration').ToString()
+                                    $Value = [int]($Policy -replace '\D', '')
+                                    @{ Pass = $Value -ge 15; ActualValue = $Value; ExpectedValue = '>=15' }
+                                }
+                            }
+                            @{
+                                Id = '1.2.2'
+                                Name = 'Account lockout threshold'
+                                Level = 'Level1'
+                                Check = {
+                                    $Policy = (net accounts | Select-String 'Lockout threshold').ToString()
+                                    $Value = [int]($Policy -replace '\D', '')
+                                    @{ Pass = $Value -le 5 -and $Value -gt 0; ActualValue = $Value; ExpectedValue = '1-5' }
+                                }
+                            }
+                        )
+                        'LocalPolicies' = @(
+                            @{
+                                Id = '2.2.1'
+                                Name = 'Guest account status'
+                                Level = 'Level1'
+                                Check = {
+                                    $Guest = Get-LocalUser -Name 'Guest' -ErrorAction SilentlyContinue
+                                    @{ Pass = $Guest.Enabled -eq $false; ActualValue = $Guest.Enabled; ExpectedValue = 'Disabled' }
+                                }
+                            }
+                            @{
+                                Id = '2.2.2'
+                                Name = 'Administrator account renamed'
+                                Level = 'Level1'
+                                Check = {
+                                    $Admin = Get-LocalUser | Where-Object { $_.SID -like '*-500' }
+                                    @{ Pass = $Admin.Name -ne 'Administrator'; ActualValue = $Admin.Name; ExpectedValue = 'Not Administrator' }
+                                }
+                            }
+                        )
+                        'SecurityOptions' = @(
+                            @{
+                                Id = '2.3.1'
+                                Name = 'UAC - Admin Approval Mode'
+                                Level = 'Level1'
+                                Check = {
+                                    $Value = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'EnableLUA' -ErrorAction SilentlyContinue).EnableLUA
+                                    @{ Pass = $Value -eq 1; ActualValue = $Value; ExpectedValue = '1' }
+                                }
+                            }
+                            @{
+                                Id = '2.3.2'
+                                Name = 'UAC - Elevation prompt behavior'
+                                Level = 'Level1'
+                                Check = {
+                                    $Value = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'ConsentPromptBehaviorAdmin' -ErrorAction SilentlyContinue).ConsentPromptBehaviorAdmin
+                                    @{ Pass = $Value -in @(1,2,3,4,5); ActualValue = $Value; ExpectedValue = '1-5' }
+                                }
+                            }
+                        )
+                        'AuditPolicy' = @(
+                            @{
+                                Id = '17.1.1'
+                                Name = 'Audit Credential Validation'
+                                Level = 'Level1'
+                                Check = {
+                                    $Audit = auditpol /get /subcategory:"Credential Validation" 2>$null
+                                    $Pass = $Audit -match 'Success and Failure|Success|Failure'
+                                    @{ Pass = $Pass; ActualValue = ($Audit -join ' ').Trim(); ExpectedValue = 'Enabled' }
+                                }
+                            }
+                            @{
+                                Id = '17.2.1'
+                                Name = 'Audit Security Group Management'
+                                Level = 'Level1'
+                                Check = {
+                                    $Audit = auditpol /get /subcategory:"Security Group Management" 2>$null
+                                    $Pass = $Audit -match 'Success'
+                                    @{ Pass = $Pass; ActualValue = ($Audit -join ' ').Trim(); ExpectedValue = 'Success' }
+                                }
+                            }
+                            @{
+                                Id = '17.3.1'
+                                Name = 'Audit Logon'
+                                Level = 'Level1'
+                                Check = {
+                                    $Audit = auditpol /get /subcategory:"Logon" 2>$null
+                                    $Pass = $Audit -match 'Success and Failure'
+                                    @{ Pass = $Pass; ActualValue = ($Audit -join ' ').Trim(); ExpectedValue = 'Success and Failure' }
+                                }
+                            }
+                        )
+                        'WindowsFirewall' = @(
+                            @{
+                                Id = '9.1.1'
+                                Name = 'Domain Profile - Firewall State'
+                                Level = 'Level1'
+                                Check = {
+                                    $Profile = Get-NetFirewallProfile -Name Domain
+                                    @{ Pass = $Profile.Enabled; ActualValue = $Profile.Enabled; ExpectedValue = 'True' }
+                                }
+                            }
+                            @{
+                                Id = '9.2.1'
+                                Name = 'Private Profile - Firewall State'
+                                Level = 'Level1'
+                                Check = {
+                                    $Profile = Get-NetFirewallProfile -Name Private
+                                    @{ Pass = $Profile.Enabled; ActualValue = $Profile.Enabled; ExpectedValue = 'True' }
+                                }
+                            }
+                            @{
+                                Id = '9.3.1'
+                                Name = 'Public Profile - Firewall State'
+                                Level = 'Level1'
+                                Check = {
+                                    $Profile = Get-NetFirewallProfile -Name Public
+                                    @{ Pass = $Profile.Enabled; ActualValue = $Profile.Enabled; ExpectedValue = 'True' }
+                                }
+                            }
+                        )
+                        'WindowsDefender' = @(
+                            @{
+                                Id = '18.9.1'
+                                Name = 'Windows Defender Real-time Protection'
+                                Level = 'Level1'
+                                Check = {
+                                    $Status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+                                    @{ Pass = $Status.RealTimeProtectionEnabled -eq $true; ActualValue = $Status.RealTimeProtectionEnabled; ExpectedValue = 'True' }
+                                }
+                            }
+                            @{
+                                Id = '18.9.2'
+                                Name = 'Windows Defender Antivirus Enabled'
+                                Level = 'Level1'
+                                Check = {
+                                    $Status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+                                    @{ Pass = $Status.AntivirusEnabled -eq $true; ActualValue = $Status.AntivirusEnabled; ExpectedValue = 'True' }
+                                }
+                            }
+                        )
+                        'NetworkSecurity' = @(
+                            @{
+                                Id = '18.4.1'
+                                Name = 'SMBv1 Client Disabled'
+                                Level = 'Level1'
+                                Check = {
+                                    $Feature = Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction SilentlyContinue
+                                    @{ Pass = $Feature.State -eq 'Disabled'; ActualValue = $Feature.State; ExpectedValue = 'Disabled' }
+                                }
+                            }
+                            @{
+                                Id = '18.4.2'
+                                Name = 'SMBv1 Server Disabled'
+                                Level = 'Level1'
+                                Check = {
+                                    $Config = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
+                                    @{ Pass = $Config.EnableSMB1Protocol -eq $false; ActualValue = $Config.EnableSMB1Protocol; ExpectedValue = 'False' }
+                                }
+                            }
+                        )
+                    }
+
+                    # Execute CIS checks
+                    foreach ($Category in $CISChecks.Keys) {
+                        Write-Output ""
+                        Write-Output "Checking category: $Category"
+
+                        $CategoryResult = @{
+                            Total = 0
+                            Passed = 0
+                            Failed = 0
+                            NotApplicable = 0
+                        }
+
+                        foreach ($Check in $CISChecks[$Category]) {
+                            # Skip Level2 checks if only Level1 is requested
+                            if ($CISLevel -eq 'Level1' -and $Check.Level -eq 'Level2') {
+                                continue
+                            }
+
+                            $CISResult.TotalControls++
+                            $CategoryResult.Total++
+
+                            try {
+                                $Result = & $Check.Check
+                                $ControlResult = @{
+                                    ControlId = $Check.Id
+                                    ControlName = $Check.Name
+                                    Category = $Category
+                                    Level = $Check.Level
+                                    Status = if ($Result.Pass) { 'Pass' } else { 'Fail' }
+                                    ActualValue = $Result.ActualValue
+                                    ExpectedValue = $Result.ExpectedValue
+                                }
+
+                                if ($Result.Pass) {
+                                    $CISResult.PassedControls++
+                                    $CategoryResult.Passed++
+                                    Write-Output "  [PASS] $($Check.Id): $($Check.Name)"
+                                } else {
+                                    $CISResult.FailedControls++
+                                    $CategoryResult.Failed++
+                                    Write-Output "  [FAIL] $($Check.Id): $($Check.Name) (Expected: $($Result.ExpectedValue), Actual: $($Result.ActualValue))"
+                                }
+                            } catch {
+                                $CISResult.NotApplicable++
+                                $CategoryResult.NotApplicable++
+                                $ControlResult = @{
+                                    ControlId = $Check.Id
+                                    ControlName = $Check.Name
+                                    Category = $Category
+                                    Level = $Check.Level
+                                    Status = 'NotApplicable'
+                                    Error = $_.Exception.Message
+                                }
+                                Write-Output "  [N/A] $($Check.Id): $($Check.Name) - $($_.Exception.Message)"
+                            }
+
+                            $CISResult.ControlResults += $ControlResult
+                        }
+
+                        $CISResult.Categories[$Category] = $CategoryResult
+                    }
+
+                    # Calculate compliance percentage
+                    $ApplicableControls = $CISResult.TotalControls - $CISResult.NotApplicable
+                    if ($ApplicableControls -gt 0) {
+                        $CISResult.CompliancePercentage = [math]::Round(
+                            ($CISResult.PassedControls / $ApplicableControls) * 100, 2
+                        )
+                    }
+
+                    Write-Output ""
+                    Write-Output "=== CIS Compliance Summary ==="
+                    Write-Output "Total Controls: $($CISResult.TotalControls)"
+                    Write-Output "Passed: $($CISResult.PassedControls)"
+                    Write-Output "Failed: $($CISResult.FailedControls)"
+                    Write-Output "Not Applicable: $($CISResult.NotApplicable)"
+                    Write-Output "Compliance: $($CISResult.CompliancePercentage)%"
+                }
+
+                # Save CIS result
+                $CISResultFile = Join-Path $ReportsPath 'cis-result.json'
+                $CISResult | ConvertTo-Json -Depth 10 | Set-Content -Path $CISResultFile
+                Write-Output "CIS result saved: $CISResultFile"
+
+            } catch {
+                Write-Error "CIS compliance scan failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: GenerateReport
+    action: aws:runCommand
+    description: Generate comprehensive JSON compliance report.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Generate Compliance Report
+            $ErrorActionPreference = 'Stop'
+
+            $Environment = '{{ Environment }}'
+            $IncludeRemediation = '{{ IncludeRemediationPlan }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ComplianceRoot = Join-Path $HyperionRoot 'Compliance'
+            $ReportsPath = Join-Path $ComplianceRoot 'Reports'
+            $LogPath = Join-Path $ComplianceRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "report-gen-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Generating Compliance Report ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $InstanceType = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-type' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+                $AMIId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/ami-id' -TimeoutSec 2)
+
+                # Get system information
+                $OS = Get-CimInstance -ClassName Win32_OperatingSystem
+                $Computer = Get-CimInstance -ClassName Win32_ComputerSystem
+
+                # Load scan results
+                $DSCResultFile = Join-Path $ReportsPath 'dsc-result.json'
+                $CISResultFile = Join-Path $ReportsPath 'cis-result.json'
+
+                $DSCResult = if (Test-Path $DSCResultFile) {
+                    Get-Content $DSCResultFile | ConvertFrom-Json
+                } else {
+                    @{ Skipped = $true; Reason = 'DSC result file not found' }
+                }
+
+                $CISResult = if (Test-Path $CISResultFile) {
+                    Get-Content $CISResultFile | ConvertFrom-Json
+                } else {
+                    @{ Skipped = $true; Reason = 'CIS result file not found' }
+                }
+
+                # Calculate overall compliance
+                $OverallCompliance = 0
+                $ComplianceComponents = 0
+
+                if (-not $DSCResult.Skipped -and $DSCResult.ConfigurationApplied) {
+                    $OverallCompliance += $DSCResult.CompliancePercentage
+                    $ComplianceComponents++
+                }
+
+                if (-not $CISResult.Skipped) {
+                    $OverallCompliance += $CISResult.CompliancePercentage
+                    $ComplianceComponents++
+                }
+
+                if ($ComplianceComponents -gt 0) {
+                    $OverallCompliance = [math]::Round($OverallCompliance / $ComplianceComponents, 2)
+                }
+
+                # Build comprehensive report
+                $Report = @{
+                    ReportMetadata = @{
+                        ReportId = [guid]::NewGuid().ToString()
+                        GeneratedAt = (Get-Date).ToString('o')
+                        ReportVersion = '1.0'
+                        Generator = 'Hyperion Fleet Manager - Compliance Scan'
+                    }
+                    InstanceInfo = @{
+                        InstanceId = $InstanceId
+                        InstanceType = $InstanceType
+                        AvailabilityZone = $AvailabilityZone
+                        Region = $Region
+                        AMIId = $AMIId
+                        Environment = $Environment
+                        Hostname = $env:COMPUTERNAME
+                        OperatingSystem = $OS.Caption
+                        OSVersion = $OS.Version
+                        OSBuild = $OS.BuildNumber
+                        Architecture = $OS.OSArchitecture
+                        TotalMemoryGB = [math]::Round($Computer.TotalPhysicalMemory / 1GB, 2)
+                        Domain = $Computer.Domain
+                        DomainJoined = $Computer.PartOfDomain
+                    }
+                    ComplianceSummary = @{
+                        OverallCompliancePercentage = $OverallCompliance
+                        OverallStatus = if ($OverallCompliance -ge 90) { 'Compliant' }
+                                       elseif ($OverallCompliance -ge 70) { 'PartiallyCompliant' }
+                                       else { 'NonCompliant' }
+                        DSCCompliance = @{
+                            Enabled = -not $DSCResult.Skipped -and $DSCResult.ConfigurationApplied
+                            Percentage = if ($DSCResult.CompliancePercentage) { $DSCResult.CompliancePercentage } else { 0 }
+                            InDesiredState = $DSCResult.InDesiredState
+                        }
+                        CISCompliance = @{
+                            Enabled = -not $CISResult.Skipped
+                            Percentage = if ($CISResult.CompliancePercentage) { $CISResult.CompliancePercentage } else { 0 }
+                            BenchmarkLevel = $CISResult.BenchmarkLevel
+                        }
+                    }
+                    DSCResults = $DSCResult
+                    CISResults = $CISResult
+                }
+
+                # Add remediation recommendations if enabled
+                if ($IncludeRemediation -eq 'true') {
+                    Write-Output "Generating remediation recommendations..."
+
+                    $Remediations = @()
+
+                    # DSC remediations
+                    if ($DSCResult.ResourcesNotInDesiredState) {
+                        foreach ($Resource in $DSCResult.ResourcesNotInDesiredState) {
+                            $Remediations += @{
+                                Source = 'DSC'
+                                Priority = 'High'
+                                ResourceId = $Resource.ResourceId
+                                Issue = "Resource not in desired state"
+                                Recommendation = "Apply DSC configuration to remediate: Start-DscConfiguration -UseExisting -Force"
+                                AutoRemediable = $true
+                            }
+                        }
+                    }
+
+                    # CIS remediations
+                    if ($CISResult.ControlResults) {
+                        $FailedControls = $CISResult.ControlResults | Where-Object { $_.Status -eq 'Fail' }
+                        foreach ($Control in $FailedControls) {
+                            $Remediation = @{
+                                Source = 'CIS'
+                                Priority = if ($Control.Level -eq 'Level1') { 'High' } else { 'Medium' }
+                                ControlId = $Control.ControlId
+                                ControlName = $Control.ControlName
+                                Issue = "Expected: $($Control.ExpectedValue), Actual: $($Control.ActualValue)"
+                                Category = $Control.Category
+                            }
+
+                            # Add specific remediation recommendations
+                            switch -Regex ($Control.ControlId) {
+                                '^1\.1\.' {
+                                    $Remediation.Recommendation = "Update password policy using: net accounts or Group Policy"
+                                    $Remediation.AutoRemediable = $true
+                                }
+                                '^2\.2\.' {
+                                    $Remediation.Recommendation = "Update local user settings via Local Users and Groups or PowerShell"
+                                    $Remediation.AutoRemediable = $true
+                                }
+                                '^9\.' {
+                                    $Remediation.Recommendation = "Enable Windows Firewall via Set-NetFirewallProfile"
+                                    $Remediation.AutoRemediable = $true
+                                }
+                                '^17\.' {
+                                    $Remediation.Recommendation = "Configure audit policy via auditpol or Group Policy"
+                                    $Remediation.AutoRemediable = $true
+                                }
+                                '^18\.9\.' {
+                                    $Remediation.Recommendation = "Enable Windows Defender via Set-MpPreference"
+                                    $Remediation.AutoRemediable = $true
+                                }
+                                default {
+                                    $Remediation.Recommendation = "Review CIS benchmark documentation for remediation steps"
+                                    $Remediation.AutoRemediable = $false
+                                }
+                            }
+
+                            $Remediations += $Remediation
+                        }
+                    }
+
+                    $Report.RemediationPlan = @{
+                        TotalIssues = $Remediations.Count
+                        HighPriority = ($Remediations | Where-Object { $_.Priority -eq 'High' }).Count
+                        MediumPriority = ($Remediations | Where-Object { $_.Priority -eq 'Medium' }).Count
+                        AutoRemediable = ($Remediations | Where-Object { $_.AutoRemediable }).Count
+                        Remediations = $Remediations
+                    }
+                }
+
+                # Save final report
+                $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                $ReportFileName = "compliance-report-$InstanceId-$Timestamp.json"
+                $ReportFile = Join-Path $ReportsPath $ReportFileName
+
+                $Report | ConvertTo-Json -Depth 20 | Set-Content -Path $ReportFile
+                Write-Output "Report saved: $ReportFile"
+
+                # Also save as latest report
+                $LatestReportFile = Join-Path $ReportsPath 'compliance-report-latest.json'
+                $Report | ConvertTo-Json -Depth 20 | Set-Content -Path $LatestReportFile
+
+                Write-Output ""
+                Write-Output "=== Compliance Report Summary ==="
+                Write-Output "Instance: $InstanceId"
+                Write-Output "Overall Compliance: $($Report.ComplianceSummary.OverallCompliancePercentage)%"
+                Write-Output "Status: $($Report.ComplianceSummary.OverallStatus)"
+                Write-Output "DSC Compliance: $($Report.ComplianceSummary.DSCCompliance.Percentage)%"
+                Write-Output "CIS Compliance: $($Report.ComplianceSummary.CISCompliance.Percentage)%"
+                if ($IncludeRemediation -eq 'true') {
+                    Write-Output "Remediation Items: $($Report.RemediationPlan.TotalIssues)"
+                }
+
+                # Output report path for next step
+                Write-Output "REPORT_FILE=$ReportFile"
+
+            } catch {
+                Write-Error "Report generation failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: UploadToS3
+    action: aws:runCommand
+    description: Upload compliance report to S3.
+    timeoutSeconds: 300
+    maxAttempts: 3
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Upload Report to S3
+            $ErrorActionPreference = 'Stop'
+
+            $BucketName = '{{ BucketName }}'
+            $ReportPrefix = '{{ ReportPrefix }}'
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ComplianceRoot = Join-Path $HyperionRoot 'Compliance'
+            $ReportsPath = Join-Path $ComplianceRoot 'Reports'
+            $LogPath = Join-Path $ComplianceRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "s3-upload-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Uploading Report to S3 ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+
+                # Find latest report
+                $LatestReport = Get-ChildItem -Path $ReportsPath -Filter 'compliance-report-*.json' |
+                    Where-Object { $_.Name -ne 'compliance-report-latest.json' } |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -First 1
+
+                if (-not $LatestReport) {
+                    throw "No compliance report found to upload"
+                }
+
+                Write-Output "Report file: $($LatestReport.FullName)"
+                Write-Output "File size: $($LatestReport.Length) bytes"
+
+                # Build S3 key
+                $Date = Get-Date -Format 'yyyy/MM/dd'
+                $S3Key = "$ReportPrefix/$Environment/$Date/$InstanceId/$($LatestReport.Name)"
+
+                Write-Output "S3 Destination: s3://$BucketName/$S3Key"
+
+                # Upload to S3
+                Write-S3Object -BucketName $BucketName -Key $S3Key -File $LatestReport.FullName -Region $Region
+
+                Write-Output "Upload successful!"
+
+                # Also upload as latest for this instance
+                $LatestS3Key = "$ReportPrefix/$Environment/latest/$InstanceId/compliance-report-latest.json"
+                Write-S3Object -BucketName $BucketName -Key $LatestS3Key -File $LatestReport.FullName -Region $Region
+                Write-Output "Latest report updated: s3://$BucketName/$LatestS3Key"
+
+                # Output S3 location
+                Write-Output ""
+                Write-Output "S3_REPORT_URI=s3://$BucketName/$S3Key"
+
+            } catch {
+                Write-Error "S3 upload failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: PublishMetrics
+    action: aws:runCommand
+    description: Publish compliance metrics to CloudWatch.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Publish CloudWatch Metrics
+            $ErrorActionPreference = 'Stop'
+
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ComplianceRoot = Join-Path $HyperionRoot 'Compliance'
+            $ReportsPath = Join-Path $ComplianceRoot 'Reports'
+            $LogPath = Join-Path $ComplianceRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "cw-publish-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Publishing CloudWatch Metrics ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+
+                # Load report
+                $ReportFile = Join-Path $ReportsPath 'compliance-report-latest.json'
+                if (-not (Test-Path $ReportFile)) {
+                    throw "Compliance report not found: $ReportFile"
+                }
+
+                $Report = Get-Content $ReportFile | ConvertFrom-Json
+
+                # Prepare metrics namespace and dimensions
+                $Namespace = 'HyperionFleet/Compliance'
+                $BaseDimensions = @(
+                    @{ Name = 'InstanceId'; Value = $InstanceId }
+                    @{ Name = 'Environment'; Value = $Environment }
+                )
+
+                # Publish overall compliance metrics
+                $Metrics = @(
+                    @{
+                        MetricName = 'OverallCompliancePercentage'
+                        Value = $Report.ComplianceSummary.OverallCompliancePercentage
+                        Unit = 'Percent'
+                        Dimensions = $BaseDimensions
+                    }
+                    @{
+                        MetricName = 'ComplianceStatus'
+                        Value = switch ($Report.ComplianceSummary.OverallStatus) {
+                            'Compliant' { 1 }
+                            'PartiallyCompliant' { 0 }
+                            'NonCompliant' { -1 }
+                            default { 0 }
+                        }
+                        Unit = 'Count'
+                        Dimensions = $BaseDimensions
+                    }
+                )
+
+                # DSC metrics
+                if ($Report.ComplianceSummary.DSCCompliance.Enabled) {
+                    $DSCDimensions = $BaseDimensions + @{ Name = 'ComplianceType'; Value = 'DSC' }
+                    $Metrics += @{
+                        MetricName = 'DSCCompliancePercentage'
+                        Value = $Report.ComplianceSummary.DSCCompliance.Percentage
+                        Unit = 'Percent'
+                        Dimensions = $DSCDimensions
+                    }
+                    $Metrics += @{
+                        MetricName = 'DSCInDesiredState'
+                        Value = if ($Report.ComplianceSummary.DSCCompliance.InDesiredState) { 1 } else { 0 }
+                        Unit = 'Count'
+                        Dimensions = $DSCDimensions
+                    }
+
+                    if ($Report.DSCResults.TotalResources) {
+                        $Metrics += @{
+                            MetricName = 'DSCCompliantResources'
+                            Value = $Report.DSCResults.CompliantResources
+                            Unit = 'Count'
+                            Dimensions = $DSCDimensions
+                        }
+                        $Metrics += @{
+                            MetricName = 'DSCNonCompliantResources'
+                            Value = $Report.DSCResults.NonCompliantResources
+                            Unit = 'Count'
+                            Dimensions = $DSCDimensions
+                        }
+                    }
+                }
+
+                # CIS metrics
+                if ($Report.ComplianceSummary.CISCompliance.Enabled) {
+                    $CISDimensions = $BaseDimensions + @(
+                        @{ Name = 'ComplianceType'; Value = 'CIS' }
+                        @{ Name = 'BenchmarkLevel'; Value = $Report.ComplianceSummary.CISCompliance.BenchmarkLevel }
+                    )
+                    $Metrics += @{
+                        MetricName = 'CISCompliancePercentage'
+                        Value = $Report.ComplianceSummary.CISCompliance.Percentage
+                        Unit = 'Percent'
+                        Dimensions = $CISDimensions
+                    }
+
+                    if ($Report.CISResults.TotalControls) {
+                        $Metrics += @{
+                            MetricName = 'CISPassedControls'
+                            Value = $Report.CISResults.PassedControls
+                            Unit = 'Count'
+                            Dimensions = $CISDimensions
+                        }
+                        $Metrics += @{
+                            MetricName = 'CISFailedControls'
+                            Value = $Report.CISResults.FailedControls
+                            Unit = 'Count'
+                            Dimensions = $CISDimensions
+                        }
+                    }
+
+                    # Category-level metrics
+                    if ($Report.CISResults.Categories) {
+                        foreach ($Category in $Report.CISResults.Categories.PSObject.Properties) {
+                            $CategoryDimensions = $BaseDimensions + @(
+                                @{ Name = 'ComplianceType'; Value = 'CIS' }
+                                @{ Name = 'Category'; Value = $Category.Name }
+                            )
+                            $CategoryCompliance = 0
+                            if ($Category.Value.Total -gt 0) {
+                                $CategoryCompliance = [math]::Round(
+                                    ($Category.Value.Passed / $Category.Value.Total) * 100, 2
+                                )
+                            }
+                            $Metrics += @{
+                                MetricName = 'CISCategoryCompliance'
+                                Value = $CategoryCompliance
+                                Unit = 'Percent'
+                                Dimensions = $CategoryDimensions
+                            }
+                        }
+                    }
+                }
+
+                # Remediation metrics
+                if ($Report.RemediationPlan) {
+                    $Metrics += @{
+                        MetricName = 'RemediationItemsTotal'
+                        Value = $Report.RemediationPlan.TotalIssues
+                        Unit = 'Count'
+                        Dimensions = $BaseDimensions
+                    }
+                    $Metrics += @{
+                        MetricName = 'RemediationItemsHighPriority'
+                        Value = $Report.RemediationPlan.HighPriority
+                        Unit = 'Count'
+                        Dimensions = $BaseDimensions
+                    }
+                }
+
+                # Publish all metrics
+                Write-Output "Publishing $($Metrics.Count) metrics to CloudWatch..."
+                foreach ($Metric in $Metrics) {
+                    try {
+                        Write-CloudWatchMetricData -Namespace $Namespace -MetricData $Metric -Region $Region
+                        Write-Output "  Published: $($Metric.MetricName) = $($Metric.Value)"
+                    } catch {
+                        Write-Warning "  Failed to publish $($Metric.MetricName): $_"
+                    }
+                }
+
+                Write-Output ""
+                Write-Output "=== Compliance Scan Complete ==="
+                Write-Output "Instance: $InstanceId"
+                Write-Output "Overall Compliance: $($Report.ComplianceSummary.OverallCompliancePercentage)%"
+                Write-Output "Status: $($Report.ComplianceSummary.OverallStatus)"
+
+            } catch {
+                Write-Error "CloudWatch publishing failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String

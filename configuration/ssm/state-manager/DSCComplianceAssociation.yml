@@ -1,0 +1,226 @@
+---
+# Hyperion Fleet Manager - DSC Compliance State Manager Association
+# This association ensures hourly DSC compliance checks on target instances
+#
+# Deploy this association using AWS CLI or Terraform to automatically
+# run compliance scans on your Windows fleet.
+
+# Association metadata
+AssociationName: HyperionFleet-DSCCompliance-Hourly
+AssociationDescription: |
+  Hyperion Fleet Manager automated DSC compliance check.
+  Runs hourly to verify instances remain in their desired configuration state.
+  Reports results to CloudWatch for monitoring and alerting.
+
+# Document to execute
+DocumentName: HyperionFleet-ApplyDSCConfiguration
+
+# Target selection using tags
+Targets:
+  - Key: tag:ManagedBy
+    Values:
+      - hyperion-fleet-manager
+  - Key: tag:DSCEnabled
+    Values:
+      - "true"
+
+# Alternative: Target by instance IDs
+# Targets:
+#   - Key: InstanceIds
+#     Values:
+#       - i-1234567890abcdef0
+#       - i-0987654321fedcba0
+
+# Alternative: Target by resource groups
+# Targets:
+#   - Key: resource-groups:Name
+#     Values:
+#       - HyperionFleetServers
+
+# Schedule expression (hourly)
+ScheduleExpression: "rate(1 hour)"
+
+# Alternative schedule expressions:
+# - Every 30 minutes: "rate(30 minutes)"
+# - Every 6 hours: "rate(6 hours)"
+# - Daily at 2 AM UTC: "cron(0 2 * * ? *)"
+# - Every Monday at 3 AM UTC: "cron(0 3 ? * MON *)"
+
+# Parameters for the document
+Parameters:
+  ConfigurationName:
+    - "BaselineConfig"
+  Environment:
+    - "{{ ssm:/hyperion-fleet/environment }}"
+  S3ConfigBucket:
+    - "{{ ssm:/hyperion-fleet/config-bucket }}"
+  S3KeyPrefix:
+    - "dsc/configurations"
+  RebootBehavior:
+    - "NoReboot"
+  ComplianceReportingEnabled:
+    - "true"
+  # Note: TargetInstances is handled by the Targets section
+
+# Execution controls
+MaxConcurrency: "25%"
+MaxErrors: "10%"
+
+# Compliance severity for SSM Compliance
+ComplianceSeverity: MEDIUM
+
+# Sync compliance data to S3
+SyncCompliance: AUTO
+
+# Output location for detailed logs
+OutputLocation:
+  S3Location:
+    OutputS3Region: "{{ ssm:/hyperion-fleet/region }}"
+    OutputS3BucketName: "{{ ssm:/hyperion-fleet/logs-bucket }}"
+    OutputS3KeyPrefix: "ssm/dsc-compliance"
+
+# Calendar-based scheduling (optional)
+# Only run during maintenance windows
+# CalendarNames:
+#   - "arn:aws:ssm:us-east-1:123456789012:document/MaintenanceWindowCalendar"
+
+# Apply association only to online instances
+ApplyOnlyAtCronInterval: false
+WaitForSuccessTimeoutSeconds: 600
+
+---
+# Terraform resource example for deploying this association
+# terraform_resource: |
+#   resource "aws_ssm_association" "dsc_compliance_hourly" {
+#     name = "HyperionFleet-ApplyDSCConfiguration"
+#
+#     association_name = "HyperionFleet-DSCCompliance-Hourly"
+#
+#     targets {
+#       key    = "tag:ManagedBy"
+#       values = ["hyperion-fleet-manager"]
+#     }
+#
+#     targets {
+#       key    = "tag:DSCEnabled"
+#       values = ["true"]
+#     }
+#
+#     schedule_expression = "rate(1 hour)"
+#
+#     parameters = {
+#       ConfigurationName          = "BaselineConfig"
+#       Environment               = var.environment
+#       S3ConfigBucket            = var.config_bucket
+#       S3KeyPrefix               = "dsc/configurations"
+#       RebootBehavior            = "NoReboot"
+#       ComplianceReportingEnabled = "true"
+#     }
+#
+#     max_concurrency = "25%"
+#     max_errors      = "10%"
+#
+#     compliance_severity = "MEDIUM"
+#
+#     output_location {
+#       s3_bucket_name = var.logs_bucket
+#       s3_key_prefix  = "ssm/dsc-compliance"
+#       s3_region      = var.region
+#     }
+#
+#     tags = {
+#       Name        = "hyperion-dsc-compliance"
+#       Environment = var.environment
+#       ManagedBy   = "terraform"
+#       Project     = "hyperion-fleet-manager"
+#     }
+#   }
+
+---
+# AWS CLI deployment example
+# aws_cli_deployment: |
+#   aws ssm create-association \
+#     --name "HyperionFleet-ApplyDSCConfiguration" \
+#     --association-name "HyperionFleet-DSCCompliance-Hourly" \
+#     --targets "Key=tag:ManagedBy,Values=hyperion-fleet-manager" "Key=tag:DSCEnabled,Values=true" \
+#     --schedule-expression "rate(1 hour)" \
+#     --parameters "ConfigurationName=BaselineConfig,Environment=dev,S3ConfigBucket=my-config-bucket,RebootBehavior=NoReboot,ComplianceReportingEnabled=true" \
+#     --max-concurrency "25%" \
+#     --max-errors "10%" \
+#     --compliance-severity "MEDIUM" \
+#     --output-location "S3Location={OutputS3Region=us-east-1,OutputS3BucketName=my-logs-bucket,OutputS3KeyPrefix=ssm/dsc-compliance}"
+
+---
+# CloudWatch Alarm for compliance failures
+# cloudwatch_alarm: |
+#   resource "aws_cloudwatch_metric_alarm" "dsc_compliance_failure" {
+#     alarm_name          = "hyperion-dsc-compliance-failure"
+#     comparison_operator = "LessThanThreshold"
+#     evaluation_periods  = 2
+#     metric_name         = "CompliancePercentage"
+#     namespace           = "HyperionFleet/DSC"
+#     period              = 3600
+#     statistic           = "Average"
+#     threshold           = 90
+#     alarm_description   = "DSC compliance dropped below 90%"
+#
+#     dimensions = {
+#       Environment = var.environment
+#     }
+#
+#     alarm_actions = [aws_sns_topic.alerts.arn]
+#     ok_actions    = [aws_sns_topic.alerts.arn]
+#   }
+
+---
+# IAM role requirements for this association
+# iam_requirements: |
+#   The automation assume role needs the following permissions:
+#
+#   - ssm:SendCommand
+#   - ssm:ListCommands
+#   - ssm:ListCommandInvocations
+#   - ssm:GetCommandInvocation
+#   - s3:GetObject (for config bucket)
+#   - s3:PutObject (for logs bucket)
+#   - cloudwatch:PutMetricData
+#   - logs:CreateLogGroup
+#   - logs:CreateLogStream
+#   - logs:PutLogEvents
+#
+#   Example IAM policy:
+#   {
+#     "Version": "2012-10-17",
+#     "Statement": [
+#       {
+#         "Effect": "Allow",
+#         "Action": [
+#           "ssm:SendCommand",
+#           "ssm:ListCommands",
+#           "ssm:ListCommandInvocations"
+#         ],
+#         "Resource": "*"
+#       },
+#       {
+#         "Effect": "Allow",
+#         "Action": [
+#           "s3:GetObject",
+#           "s3:PutObject"
+#         ],
+#         "Resource": [
+#           "arn:aws:s3:::config-bucket/*",
+#           "arn:aws:s3:::logs-bucket/*"
+#         ]
+#       },
+#       {
+#         "Effect": "Allow",
+#         "Action": "cloudwatch:PutMetricData",
+#         "Resource": "*",
+#         "Condition": {
+#           "StringEquals": {
+#             "cloudwatch:namespace": "HyperionFleet/DSC"
+#           }
+#         }
+#       }
+#     ]
+#   }

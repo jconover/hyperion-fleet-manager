@@ -1,0 +1,1095 @@
+---
+# Hyperion Fleet Manager - Collect Inventory
+# SSM Automation Document for comprehensive system inventory collection
+#
+# This document collects detailed system information including hardware,
+# software, features, services, and uploads to SSM Inventory.
+
+schemaVersion: "0.3"
+description: |
+  Collect comprehensive system inventory for Windows fleet management.
+  Gathers system information, installed software, Windows features,
+  services status, and uploads to SSM Inventory for centralized tracking.
+
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: "(Required) The ARN of the IAM role that allows Automation to perform actions on your behalf."
+    default: ""
+
+  TargetInstances:
+    type: StringList
+    description: "(Required) List of target instance IDs."
+
+  InventoryTypes:
+    type: StringList
+    description: "(Optional) Types of inventory to collect."
+    default:
+      - System
+      - Software
+      - Features
+      - Services
+      - Network
+      - Security
+    allowedValues:
+      - System
+      - Software
+      - Features
+      - Services
+      - Network
+      - Security
+      - All
+
+  UploadToS3:
+    type: String
+    description: "(Optional) Upload inventory to S3 bucket."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "false"
+
+  S3BucketName:
+    type: String
+    description: "(Optional) S3 bucket for inventory storage."
+    default: ""
+
+  S3KeyPrefix:
+    type: String
+    description: "(Optional) S3 key prefix for inventory files."
+    default: "inventory"
+
+  Environment:
+    type: String
+    description: "(Required) Environment identifier."
+    allowedValues:
+      - dev
+      - staging
+      - prod
+    default: "dev"
+
+  MaxConcurrency:
+    type: String
+    description: "(Optional) Maximum concurrent instances."
+    default: "50"
+
+  MaxErrors:
+    type: String
+    description: "(Optional) Maximum errors before stopping automation."
+    default: "10"
+
+outputs:
+  - CollectSystemInfo.Output
+  - CollectSoftware.Output
+  - CollectFeatures.Output
+  - CollectServices.Output
+  - UploadToSSMInventory.Output
+
+mainSteps:
+  - name: CollectSystemInfo
+    action: aws:runCommand
+    description: Collect system information (hardware, OS, network).
+    timeoutSeconds: 600
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Collect System Information
+            $ErrorActionPreference = 'Stop'
+
+            $InventoryTypes = @('{{ InventoryTypes }}')
+            $Environment = '{{ Environment }}'
+
+            # Setup paths
+            $HyperionRoot = 'C:\HyperionFleet'
+            $InventoryRoot = Join-Path $HyperionRoot 'Inventory'
+            $LogPath = Join-Path $InventoryRoot 'Logs'
+            $DataPath = Join-Path $InventoryRoot 'Data'
+
+            @($InventoryRoot, $LogPath, $DataPath) | ForEach-Object {
+                if (-not (Test-Path $_)) {
+                    New-Item -Path $_ -ItemType Directory -Force | Out-Null
+                }
+            }
+
+            $LogFile = Join-Path $LogPath "inventory-system-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Collecting System Information ==="
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+                Write-Output "Environment: $Environment"
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $InstanceType = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-type' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $AMIId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/ami-id' -TimeoutSec 2)
+
+                Write-Output "Instance ID: $InstanceId"
+
+                # Skip if System inventory not requested
+                if ($InventoryTypes -notcontains 'System' -and $InventoryTypes -notcontains 'All') {
+                    Write-Output "System inventory collection skipped"
+                    exit 0
+                }
+
+                # Collect operating system information
+                Write-Output ""
+                Write-Output "Collecting OS information..."
+                $OS = Get-CimInstance -ClassName Win32_OperatingSystem
+                $Computer = Get-CimInstance -ClassName Win32_ComputerSystem
+                $BIOS = Get-CimInstance -ClassName Win32_BIOS
+                $Processor = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
+
+                $SystemInfo = @{
+                    CollectionTimestamp = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+
+                    AWS = @{
+                        InstanceId = $InstanceId
+                        InstanceType = $InstanceType
+                        AvailabilityZone = $AvailabilityZone
+                        AMIId = $AMIId
+                        Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+                    }
+
+                    OperatingSystem = @{
+                        Caption = $OS.Caption
+                        Version = $OS.Version
+                        BuildNumber = $OS.BuildNumber
+                        Architecture = $OS.OSArchitecture
+                        InstallDate = $OS.InstallDate.ToString('o')
+                        LastBootUpTime = $OS.LastBootUpTime.ToString('o')
+                        BootDevice = $OS.BootDevice
+                        SystemDevice = $OS.SystemDevice
+                        WindowsDirectory = $OS.WindowsDirectory
+                        SystemDirectory = $OS.SystemDirectory
+                        Locale = $OS.Locale
+                        TimeZone = (Get-TimeZone).Id
+                        ProductType = switch ($OS.ProductType) {
+                            1 { 'Workstation' }
+                            2 { 'Domain Controller' }
+                            3 { 'Server' }
+                            default { 'Unknown' }
+                        }
+                    }
+
+                    Computer = @{
+                        Name = $Computer.Name
+                        Domain = $Computer.Domain
+                        PartOfDomain = $Computer.PartOfDomain
+                        Workgroup = $Computer.Workgroup
+                        Manufacturer = $Computer.Manufacturer
+                        Model = $Computer.Model
+                        SystemType = $Computer.SystemType
+                        NumberOfProcessors = $Computer.NumberOfProcessors
+                        NumberOfLogicalProcessors = $Computer.NumberOfLogicalProcessors
+                        TotalPhysicalMemoryGB = [math]::Round($Computer.TotalPhysicalMemory / 1GB, 2)
+                        DNSHostName = $Computer.DNSHostName
+                    }
+
+                    Processor = @{
+                        Name = $Processor.Name
+                        Manufacturer = $Processor.Manufacturer
+                        Description = $Processor.Description
+                        NumberOfCores = $Processor.NumberOfCores
+                        NumberOfLogicalProcessors = $Processor.NumberOfLogicalProcessors
+                        MaxClockSpeedMHz = $Processor.MaxClockSpeed
+                        L2CacheSizeKB = $Processor.L2CacheSize
+                        L3CacheSizeKB = $Processor.L3CacheSize
+                        VirtualizationFirmwareEnabled = $Processor.VirtualizationFirmwareEnabled
+                    }
+
+                    BIOS = @{
+                        Manufacturer = $BIOS.Manufacturer
+                        Name = $BIOS.Name
+                        Version = $BIOS.Version
+                        SerialNumber = $BIOS.SerialNumber
+                        ReleaseDate = if ($BIOS.ReleaseDate) { $BIOS.ReleaseDate.ToString('o') } else { $null }
+                    }
+
+                    Memory = @{
+                        TotalVisibleMemoryGB = [math]::Round($OS.TotalVisibleMemorySize / 1MB, 2)
+                        FreePhysicalMemoryGB = [math]::Round($OS.FreePhysicalMemory / 1MB, 2)
+                        TotalVirtualMemoryGB = [math]::Round($OS.TotalVirtualMemorySize / 1MB, 2)
+                        FreeVirtualMemoryGB = [math]::Round($OS.FreeVirtualMemory / 1MB, 2)
+                        MemoryUsagePercent = [math]::Round((1 - ($OS.FreePhysicalMemory / $OS.TotalVisibleMemorySize)) * 100, 2)
+                    }
+                }
+
+                # Collect disk information
+                Write-Output "Collecting disk information..."
+                $Disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3"
+                $SystemInfo.Disks = @()
+
+                foreach ($Disk in $Disks) {
+                    $SystemInfo.Disks += @{
+                        DeviceID = $Disk.DeviceID
+                        VolumeName = $Disk.VolumeName
+                        FileSystem = $Disk.FileSystem
+                        SizeGB = [math]::Round($Disk.Size / 1GB, 2)
+                        FreeSpaceGB = [math]::Round($Disk.FreeSpace / 1GB, 2)
+                        UsagePercent = [math]::Round((1 - ($Disk.FreeSpace / $Disk.Size)) * 100, 2)
+                    }
+                    Write-Output "  $($Disk.DeviceID) - $([math]::Round($Disk.FreeSpace / 1GB, 2))GB free of $([math]::Round($Disk.Size / 1GB, 2))GB"
+                }
+
+                # Collect network information if requested
+                if ($InventoryTypes -contains 'Network' -or $InventoryTypes -contains 'All') {
+                    Write-Output ""
+                    Write-Output "Collecting network information..."
+
+                    $NetworkAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue
+                    $SystemInfo.Network = @{
+                        Adapters = @()
+                        IPConfiguration = @()
+                    }
+
+                    foreach ($Adapter in $NetworkAdapters) {
+                        $IPConfig = Get-NetIPConfiguration -InterfaceIndex $Adapter.InterfaceIndex -ErrorAction SilentlyContinue
+
+                        $AdapterInfo = @{
+                            Name = $Adapter.Name
+                            InterfaceDescription = $Adapter.InterfaceDescription
+                            Status = $Adapter.Status
+                            MacAddress = $Adapter.MacAddress
+                            LinkSpeed = $Adapter.LinkSpeed
+                            MediaType = $Adapter.MediaType
+                        }
+
+                        if ($IPConfig) {
+                            $AdapterInfo.IPv4Address = ($IPConfig.IPv4Address | Select-Object -First 1).IPAddress
+                            $AdapterInfo.IPv4DefaultGateway = ($IPConfig.IPv4DefaultGateway | Select-Object -First 1).NextHop
+                            $AdapterInfo.DNSServer = ($IPConfig.DNSServer | Select-Object -ExpandProperty ServerAddresses) -join ','
+                        }
+
+                        $SystemInfo.Network.Adapters += $AdapterInfo
+                        Write-Output "  $($Adapter.Name) - $($AdapterInfo.IPv4Address)"
+                    }
+
+                    # Get public IP
+                    try {
+                        $PublicIP = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/public-ipv4' -TimeoutSec 2)
+                        $SystemInfo.Network.PublicIP = $PublicIP
+                    } catch {
+                        $SystemInfo.Network.PublicIP = $null
+                    }
+
+                    # Get private IP
+                    $PrivateIP = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/local-ipv4' -TimeoutSec 2)
+                    $SystemInfo.Network.PrivateIP = $PrivateIP
+                }
+
+                # Save system info
+                $SystemInfoFile = Join-Path $DataPath 'system-info.json'
+                $SystemInfo | ConvertTo-Json -Depth 10 | Set-Content -Path $SystemInfoFile
+
+                Write-Output ""
+                Write-Output "System information collected and saved"
+                Write-Output "File: $SystemInfoFile"
+
+                Write-Output ""
+                Write-Output "SYSTEM_INFO_STATUS=Collected"
+
+            } catch {
+                Write-Error "System information collection failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: CollectSoftware
+    action: aws:runCommand
+    description: Collect installed software inventory.
+    timeoutSeconds: 600
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Collect Software Inventory
+            $ErrorActionPreference = 'Stop'
+
+            $InventoryTypes = @('{{ InventoryTypes }}')
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $InventoryRoot = Join-Path $HyperionRoot 'Inventory'
+            $LogPath = Join-Path $InventoryRoot 'Logs'
+            $DataPath = Join-Path $InventoryRoot 'Data'
+
+            $LogFile = Join-Path $LogPath "inventory-software-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Collecting Software Inventory ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Skip if Software inventory not requested
+                if ($InventoryTypes -notcontains 'Software' -and $InventoryTypes -notcontains 'All') {
+                    Write-Output "Software inventory collection skipped"
+                    exit 0
+                }
+
+                $SoftwareInventory = @{
+                    CollectionTimestamp = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                    Applications = @()
+                    Hotfixes = @()
+                    ChocolateyPackages = @()
+                }
+
+                # Collect installed applications from registry
+                Write-Output ""
+                Write-Output "Collecting installed applications..."
+
+                $RegistryPaths = @(
+                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+                    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+                )
+
+                $Apps = @()
+                foreach ($Path in $RegistryPaths) {
+                    $Apps += Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue |
+                        Where-Object { $_.DisplayName } |
+                        Select-Object DisplayName, DisplayVersion, Publisher, InstallDate, InstallLocation, UninstallString
+                }
+
+                # Remove duplicates and sort
+                $UniqueApps = $Apps | Sort-Object DisplayName -Unique
+
+                foreach ($App in $UniqueApps) {
+                    $SoftwareInventory.Applications += @{
+                        Name = $App.DisplayName
+                        Version = $App.DisplayVersion
+                        Publisher = $App.Publisher
+                        InstallDate = $App.InstallDate
+                        InstallLocation = $App.InstallLocation
+                    }
+                }
+
+                Write-Output "  Found $($SoftwareInventory.Applications.Count) applications"
+
+                # Collect installed hotfixes
+                Write-Output ""
+                Write-Output "Collecting installed hotfixes..."
+
+                $Hotfixes = Get-HotFix | Select-Object HotFixID, Description, InstalledBy, InstalledOn
+
+                foreach ($Hotfix in $Hotfixes) {
+                    $SoftwareInventory.Hotfixes += @{
+                        HotFixID = $Hotfix.HotFixID
+                        Description = $Hotfix.Description
+                        InstalledBy = $Hotfix.InstalledBy
+                        InstalledOn = if ($Hotfix.InstalledOn) { $Hotfix.InstalledOn.ToString('o') } else { $null }
+                    }
+                }
+
+                Write-Output "  Found $($SoftwareInventory.Hotfixes.Count) hotfixes"
+
+                # Collect Chocolatey packages if installed
+                Write-Output ""
+                Write-Output "Collecting Chocolatey packages..."
+
+                $ChocoPath = "$env:ProgramData\chocolatey\bin\choco.exe"
+                if (Test-Path $ChocoPath) {
+                    $ChocoPackages = & $ChocoPath list --local-only --limit-output 2>$null |
+                        ConvertFrom-Csv -Header Name, Version -Delimiter '|'
+
+                    foreach ($Pkg in $ChocoPackages) {
+                        $SoftwareInventory.ChocolateyPackages += @{
+                            Name = $Pkg.Name
+                            Version = $Pkg.Version
+                        }
+                    }
+
+                    Write-Output "  Found $($SoftwareInventory.ChocolateyPackages.Count) Chocolatey packages"
+                } else {
+                    Write-Output "  Chocolatey not installed"
+                }
+
+                # Summary statistics
+                $SoftwareInventory.Summary = @{
+                    TotalApplications = $SoftwareInventory.Applications.Count
+                    TotalHotfixes = $SoftwareInventory.Hotfixes.Count
+                    TotalChocolateyPackages = $SoftwareInventory.ChocolateyPackages.Count
+                    Publishers = ($SoftwareInventory.Applications | Group-Object Publisher | Measure-Object).Count
+                }
+
+                # Save software inventory
+                $SoftwareFile = Join-Path $DataPath 'software-inventory.json'
+                $SoftwareInventory | ConvertTo-Json -Depth 10 | Set-Content -Path $SoftwareFile
+
+                Write-Output ""
+                Write-Output "Software inventory collected and saved"
+                Write-Output "File: $SoftwareFile"
+
+                Write-Output ""
+                Write-Output "SOFTWARE_INVENTORY_STATUS=Collected"
+                Write-Output "TOTAL_APPLICATIONS=$($SoftwareInventory.Summary.TotalApplications)"
+
+            } catch {
+                Write-Error "Software inventory collection failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: CollectFeatures
+    action: aws:runCommand
+    description: Collect Windows features inventory.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Collect Windows Features
+            $ErrorActionPreference = 'Stop'
+
+            $InventoryTypes = @('{{ InventoryTypes }}')
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $InventoryRoot = Join-Path $HyperionRoot 'Inventory'
+            $LogPath = Join-Path $InventoryRoot 'Logs'
+            $DataPath = Join-Path $InventoryRoot 'Data'
+
+            $LogFile = Join-Path $LogPath "inventory-features-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Collecting Windows Features ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Skip if Features inventory not requested
+                if ($InventoryTypes -notcontains 'Features' -and $InventoryTypes -notcontains 'All') {
+                    Write-Output "Features inventory collection skipped"
+                    exit 0
+                }
+
+                $FeaturesInventory = @{
+                    CollectionTimestamp = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                    ServerFeatures = @()
+                    OptionalFeatures = @()
+                }
+
+                # Check if this is a Server OS
+                $OS = Get-CimInstance -ClassName Win32_OperatingSystem
+                $IsServer = $OS.ProductType -ne 1
+
+                if ($IsServer) {
+                    Write-Output ""
+                    Write-Output "Collecting Server features..."
+
+                    try {
+                        $Features = Get-WindowsFeature -ErrorAction Stop
+
+                        foreach ($Feature in $Features | Where-Object { $_.Installed }) {
+                            $FeaturesInventory.ServerFeatures += @{
+                                Name = $Feature.Name
+                                DisplayName = $Feature.DisplayName
+                                FeatureType = $Feature.FeatureType
+                                Path = $Feature.Path
+                                InstallState = $Feature.InstallState.ToString()
+                                SubFeatures = ($Feature.SubFeatures | Where-Object { $_ })
+                            }
+                        }
+
+                        Write-Output "  Found $($FeaturesInventory.ServerFeatures.Count) installed server features"
+                    } catch {
+                        Write-Output "  Could not collect Server features: $_"
+                    }
+                } else {
+                    Write-Output "Not a Server OS, skipping Server features"
+                }
+
+                # Collect optional features (works on all Windows)
+                Write-Output ""
+                Write-Output "Collecting optional features..."
+
+                try {
+                    $OptionalFeatures = Get-WindowsOptionalFeature -Online -ErrorAction Stop
+
+                    foreach ($Feature in $OptionalFeatures | Where-Object { $_.State -eq 'Enabled' }) {
+                        $FeaturesInventory.OptionalFeatures += @{
+                            FeatureName = $Feature.FeatureName
+                            State = $Feature.State.ToString()
+                            RestartRequired = $Feature.RestartRequired
+                            CustomProperties = $Feature.CustomProperties
+                        }
+                    }
+
+                    Write-Output "  Found $($FeaturesInventory.OptionalFeatures.Count) enabled optional features"
+                } catch {
+                    Write-Output "  Could not collect optional features: $_"
+                }
+
+                # Summary
+                $FeaturesInventory.Summary = @{
+                    TotalServerFeatures = $FeaturesInventory.ServerFeatures.Count
+                    TotalOptionalFeatures = $FeaturesInventory.OptionalFeatures.Count
+                    IsServer = $IsServer
+                }
+
+                # Save features inventory
+                $FeaturesFile = Join-Path $DataPath 'features-inventory.json'
+                $FeaturesInventory | ConvertTo-Json -Depth 10 | Set-Content -Path $FeaturesFile
+
+                Write-Output ""
+                Write-Output "Features inventory collected and saved"
+                Write-Output "File: $FeaturesFile"
+
+                Write-Output ""
+                Write-Output "FEATURES_INVENTORY_STATUS=Collected"
+
+            } catch {
+                Write-Error "Features inventory collection failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: CollectServices
+    action: aws:runCommand
+    description: Collect services status inventory.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Collect Services Inventory
+            $ErrorActionPreference = 'Stop'
+
+            $InventoryTypes = @('{{ InventoryTypes }}')
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $InventoryRoot = Join-Path $HyperionRoot 'Inventory'
+            $LogPath = Join-Path $InventoryRoot 'Logs'
+            $DataPath = Join-Path $InventoryRoot 'Data'
+
+            $LogFile = Join-Path $LogPath "inventory-services-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Collecting Services Inventory ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Skip if Services inventory not requested
+                if ($InventoryTypes -notcontains 'Services' -and $InventoryTypes -notcontains 'All') {
+                    Write-Output "Services inventory collection skipped"
+                    exit 0
+                }
+
+                $ServicesInventory = @{
+                    CollectionTimestamp = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                    Services = @()
+                }
+
+                Write-Output ""
+                Write-Output "Collecting services..."
+
+                $Services = Get-Service | Select-Object Name, DisplayName, Status, StartType, ServiceType
+
+                foreach ($Service in $Services) {
+                    # Get additional service info
+                    $ServiceInfo = Get-CimInstance -ClassName Win32_Service -Filter "Name='$($Service.Name)'" -ErrorAction SilentlyContinue
+
+                    $ServicesInventory.Services += @{
+                        Name = $Service.Name
+                        DisplayName = $Service.DisplayName
+                        Status = $Service.Status.ToString()
+                        StartType = $Service.StartType.ToString()
+                        ServiceType = $Service.ServiceType.ToString()
+                        PathName = $ServiceInfo.PathName
+                        StartName = $ServiceInfo.StartName
+                        Description = $ServiceInfo.Description
+                        ProcessId = $ServiceInfo.ProcessId
+                    }
+                }
+
+                Write-Output "  Found $($ServicesInventory.Services.Count) services"
+
+                # Summary statistics
+                $RunningServices = ($ServicesInventory.Services | Where-Object { $_.Status -eq 'Running' }).Count
+                $StoppedServices = ($ServicesInventory.Services | Where-Object { $_.Status -eq 'Stopped' }).Count
+                $AutoServices = ($ServicesInventory.Services | Where-Object { $_.StartType -eq 'Automatic' }).Count
+
+                $ServicesInventory.Summary = @{
+                    TotalServices = $ServicesInventory.Services.Count
+                    Running = $RunningServices
+                    Stopped = $StoppedServices
+                    AutomaticStart = $AutoServices
+                    ManualStart = ($ServicesInventory.Services | Where-Object { $_.StartType -eq 'Manual' }).Count
+                    Disabled = ($ServicesInventory.Services | Where-Object { $_.StartType -eq 'Disabled' }).Count
+                }
+
+                Write-Output ""
+                Write-Output "Service Statistics:"
+                Write-Output "  Running: $RunningServices"
+                Write-Output "  Stopped: $StoppedServices"
+                Write-Output "  Automatic: $AutoServices"
+
+                # Identify critical services
+                $CriticalServices = @(
+                    'W32Time', 'Winmgmt', 'EventLog', 'BITS', 'wuauserv',
+                    'AmazonSSMAgent', 'AmazonCloudWatchAgent', 'Dnscache',
+                    'LanmanServer', 'LanmanWorkstation', 'RemoteRegistry',
+                    'TermService', 'WinRM'
+                )
+
+                $ServicesInventory.CriticalServices = @()
+                foreach ($ServiceName in $CriticalServices) {
+                    $CriticalService = $ServicesInventory.Services | Where-Object { $_.Name -eq $ServiceName }
+                    if ($CriticalService) {
+                        $ServicesInventory.CriticalServices += @{
+                            Name = $CriticalService.Name
+                            DisplayName = $CriticalService.DisplayName
+                            Status = $CriticalService.Status
+                            StartType = $CriticalService.StartType
+                            IsHealthy = ($CriticalService.Status -eq 'Running' -or $CriticalService.StartType -eq 'Disabled')
+                        }
+                    }
+                }
+
+                Write-Output ""
+                Write-Output "Critical services checked: $($ServicesInventory.CriticalServices.Count)"
+
+                # Save services inventory
+                $ServicesFile = Join-Path $DataPath 'services-inventory.json'
+                $ServicesInventory | ConvertTo-Json -Depth 10 | Set-Content -Path $ServicesFile
+
+                Write-Output ""
+                Write-Output "Services inventory collected and saved"
+                Write-Output "File: $ServicesFile"
+
+                Write-Output ""
+                Write-Output "SERVICES_INVENTORY_STATUS=Collected"
+                Write-Output "TOTAL_SERVICES=$($ServicesInventory.Services.Count)"
+
+            } catch {
+                Write-Error "Services inventory collection failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: CollectSecurityInfo
+    action: aws:runCommand
+    description: Collect security-related inventory.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Collect Security Inventory
+            $ErrorActionPreference = 'Stop'
+
+            $InventoryTypes = @('{{ InventoryTypes }}')
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $InventoryRoot = Join-Path $HyperionRoot 'Inventory'
+            $LogPath = Join-Path $InventoryRoot 'Logs'
+            $DataPath = Join-Path $InventoryRoot 'Data'
+
+            $LogFile = Join-Path $LogPath "inventory-security-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Collecting Security Inventory ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Skip if Security inventory not requested
+                if ($InventoryTypes -notcontains 'Security' -and $InventoryTypes -notcontains 'All') {
+                    Write-Output "Security inventory collection skipped"
+                    exit 0
+                }
+
+                $SecurityInventory = @{
+                    CollectionTimestamp = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                }
+
+                # Windows Defender status
+                Write-Output ""
+                Write-Output "Collecting Windows Defender status..."
+                try {
+                    $DefenderStatus = Get-MpComputerStatus -ErrorAction Stop
+
+                    $SecurityInventory.WindowsDefender = @{
+                        AntivirusEnabled = $DefenderStatus.AntivirusEnabled
+                        RealTimeProtectionEnabled = $DefenderStatus.RealTimeProtectionEnabled
+                        IoavProtectionEnabled = $DefenderStatus.IoavProtectionEnabled
+                        AntispywareEnabled = $DefenderStatus.AntispywareEnabled
+                        BehaviorMonitorEnabled = $DefenderStatus.BehaviorMonitorEnabled
+                        OnAccessProtectionEnabled = $DefenderStatus.OnAccessProtectionEnabled
+                        AntivirusSignatureLastUpdated = $DefenderStatus.AntivirusSignatureLastUpdated.ToString('o')
+                        AntivirusSignatureVersion = $DefenderStatus.AntivirusSignatureVersion
+                        FullScanAge = $DefenderStatus.FullScanAge
+                        QuickScanAge = $DefenderStatus.QuickScanAge
+                    }
+
+                    Write-Output "  Antivirus: $($DefenderStatus.AntivirusEnabled)"
+                    Write-Output "  Real-time Protection: $($DefenderStatus.RealTimeProtectionEnabled)"
+                } catch {
+                    Write-Output "  Could not collect Defender status: $_"
+                    $SecurityInventory.WindowsDefender = @{ Error = $_.Exception.Message }
+                }
+
+                # Firewall status
+                Write-Output ""
+                Write-Output "Collecting Firewall status..."
+                try {
+                    $FirewallProfiles = Get-NetFirewallProfile
+
+                    $SecurityInventory.Firewall = @{
+                        Profiles = @()
+                    }
+
+                    foreach ($Profile in $FirewallProfiles) {
+                        $SecurityInventory.Firewall.Profiles += @{
+                            Name = $Profile.Name
+                            Enabled = $Profile.Enabled
+                            DefaultInboundAction = $Profile.DefaultInboundAction.ToString()
+                            DefaultOutboundAction = $Profile.DefaultOutboundAction.ToString()
+                            LogAllowed = $Profile.LogAllowed
+                            LogBlocked = $Profile.LogBlocked
+                            LogFileName = $Profile.LogFileName
+                        }
+                        Write-Output "  $($Profile.Name): Enabled=$($Profile.Enabled)"
+                    }
+                } catch {
+                    Write-Output "  Could not collect Firewall status: $_"
+                    $SecurityInventory.Firewall = @{ Error = $_.Exception.Message }
+                }
+
+                # Local users and groups
+                Write-Output ""
+                Write-Output "Collecting local users and groups..."
+                try {
+                    $LocalUsers = Get-LocalUser
+
+                    $SecurityInventory.LocalUsers = @()
+                    foreach ($User in $LocalUsers) {
+                        $SecurityInventory.LocalUsers += @{
+                            Name = $User.Name
+                            Enabled = $User.Enabled
+                            PasswordRequired = $User.PasswordRequired
+                            PasswordLastSet = if ($User.PasswordLastSet) { $User.PasswordLastSet.ToString('o') } else { $null }
+                            LastLogon = if ($User.LastLogon) { $User.LastLogon.ToString('o') } else { $null }
+                            AccountExpires = if ($User.AccountExpires) { $User.AccountExpires.ToString('o') } else { $null }
+                        }
+                    }
+
+                    $AdminGroup = Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue
+                    $SecurityInventory.LocalAdministrators = @()
+                    foreach ($Admin in $AdminGroup) {
+                        $SecurityInventory.LocalAdministrators += @{
+                            Name = $Admin.Name
+                            ObjectClass = $Admin.ObjectClass
+                            PrincipalSource = $Admin.PrincipalSource.ToString()
+                        }
+                    }
+
+                    Write-Output "  Local users: $($SecurityInventory.LocalUsers.Count)"
+                    Write-Output "  Local administrators: $($SecurityInventory.LocalAdministrators.Count)"
+                } catch {
+                    Write-Output "  Could not collect users/groups: $_"
+                }
+
+                # Audit policies
+                Write-Output ""
+                Write-Output "Collecting audit policies..."
+                try {
+                    $AuditPolicies = auditpol /get /category:* 2>$null
+                    $SecurityInventory.AuditPoliciesRaw = $AuditPolicies -join "`n"
+
+                    # Parse key audit settings
+                    $SecurityInventory.AuditPolicies = @{
+                        AccountLogon = ($AuditPolicies | Select-String 'Credential Validation' | Out-String).Trim()
+                        Logon = ($AuditPolicies | Select-String '^\s+Logon\s' | Out-String).Trim()
+                        ObjectAccess = ($AuditPolicies | Select-String 'File System' | Out-String).Trim()
+                        PolicyChange = ($AuditPolicies | Select-String 'Audit Policy Change' | Out-String).Trim()
+                    }
+
+                    Write-Output "  Audit policies collected"
+                } catch {
+                    Write-Output "  Could not collect audit policies: $_"
+                }
+
+                # Certificates
+                Write-Output ""
+                Write-Output "Collecting certificate inventory..."
+                try {
+                    $Certs = Get-ChildItem -Path Cert:\LocalMachine\My -ErrorAction SilentlyContinue
+
+                    $SecurityInventory.Certificates = @()
+                    foreach ($Cert in $Certs) {
+                        $SecurityInventory.Certificates += @{
+                            Subject = $Cert.Subject
+                            Issuer = $Cert.Issuer
+                            Thumbprint = $Cert.Thumbprint
+                            NotBefore = $Cert.NotBefore.ToString('o')
+                            NotAfter = $Cert.NotAfter.ToString('o')
+                            HasPrivateKey = $Cert.HasPrivateKey
+                            IsExpired = ($Cert.NotAfter -lt (Get-Date))
+                            DaysUntilExpiry = [math]::Round(($Cert.NotAfter - (Get-Date)).TotalDays)
+                        }
+                    }
+
+                    Write-Output "  Certificates: $($SecurityInventory.Certificates.Count)"
+                } catch {
+                    Write-Output "  Could not collect certificates: $_"
+                }
+
+                # Save security inventory
+                $SecurityFile = Join-Path $DataPath 'security-inventory.json'
+                $SecurityInventory | ConvertTo-Json -Depth 10 | Set-Content -Path $SecurityFile
+
+                Write-Output ""
+                Write-Output "Security inventory collected and saved"
+                Write-Output "File: $SecurityFile"
+
+                Write-Output ""
+                Write-Output "SECURITY_INVENTORY_STATUS=Collected"
+
+            } catch {
+                Write-Error "Security inventory collection failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+
+  - name: UploadToSSMInventory
+    action: aws:runCommand
+    description: Upload collected inventory to SSM Inventory service.
+    timeoutSeconds: 600
+    maxAttempts: 2
+    onFailure: Continue
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Upload to SSM Inventory
+            $ErrorActionPreference = 'Stop'
+
+            $Environment = '{{ Environment }}'
+            $UploadToS3 = '{{ UploadToS3 }}'
+            $S3BucketName = '{{ S3BucketName }}'
+            $S3KeyPrefix = '{{ S3KeyPrefix }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $InventoryRoot = Join-Path $HyperionRoot 'Inventory'
+            $LogPath = Join-Path $InventoryRoot 'Logs'
+            $DataPath = Join-Path $InventoryRoot 'Data'
+
+            $LogFile = Join-Path $LogPath "inventory-upload-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Uploading Inventory to SSM ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+
+                Write-Output "Instance ID: $InstanceId"
+                Write-Output "Region: $Region"
+
+                # Load all inventory files
+                $InventoryFiles = @{
+                    System = 'system-info.json'
+                    Software = 'software-inventory.json'
+                    Features = 'features-inventory.json'
+                    Services = 'services-inventory.json'
+                    Security = 'security-inventory.json'
+                }
+
+                $CombinedInventory = @{
+                    CollectionTimestamp = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                    Region = $Region
+                }
+
+                foreach ($Key in $InventoryFiles.Keys) {
+                    $FilePath = Join-Path $DataPath $InventoryFiles[$Key]
+                    if (Test-Path $FilePath) {
+                        $CombinedInventory[$Key] = Get-Content $FilePath | ConvertFrom-Json
+                        Write-Output "Loaded: $Key inventory"
+                    }
+                }
+
+                # Save combined inventory
+                $CombinedFile = Join-Path $DataPath 'combined-inventory.json'
+                $CombinedInventory | ConvertTo-Json -Depth 20 | Set-Content -Path $CombinedFile
+
+                # Upload to S3 if enabled
+                if ($UploadToS3 -eq 'true' -and $S3BucketName) {
+                    Write-Output ""
+                    Write-Output "Uploading to S3..."
+
+                    $Date = Get-Date -Format 'yyyy/MM/dd'
+                    $Timestamp = Get-Date -Format 'HHmmss'
+                    $S3Key = "$S3KeyPrefix/$Environment/$Date/$InstanceId/inventory-$Timestamp.json"
+
+                    Write-S3Object -BucketName $S3BucketName -Key $S3Key -File $CombinedFile -Region $Region
+                    Write-Output "Uploaded to: s3://$S3BucketName/$S3Key"
+
+                    # Also upload as latest
+                    $LatestKey = "$S3KeyPrefix/$Environment/latest/$InstanceId/inventory-latest.json"
+                    Write-S3Object -BucketName $S3BucketName -Key $LatestKey -File $CombinedFile -Region $Region
+                    Write-Output "Latest: s3://$S3BucketName/$LatestKey"
+                }
+
+                # Create SSM Inventory custom types
+                Write-Output ""
+                Write-Output "Preparing SSM Inventory data..."
+
+                # Prepare custom inventory items
+                $InventoryItems = @()
+
+                # Custom:HyperionSystemInfo
+                if ($CombinedInventory.System) {
+                    $SystemContent = @{
+                        Hostname = $CombinedInventory.System.Computer.Name
+                        OSCaption = $CombinedInventory.System.OperatingSystem.Caption
+                        OSVersion = $CombinedInventory.System.OperatingSystem.Version
+                        Architecture = $CombinedInventory.System.OperatingSystem.Architecture
+                        TotalMemoryGB = $CombinedInventory.System.Memory.TotalVisibleMemoryGB.ToString()
+                        InstanceType = $CombinedInventory.System.AWS.InstanceType
+                        AvailabilityZone = $CombinedInventory.System.AWS.AvailabilityZone
+                        Environment = $Environment
+                    }
+
+                    $InventoryItems += @{
+                        TypeName = 'Custom:HyperionSystemInfo'
+                        SchemaVersion = '1.0'
+                        CaptureTime = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssZ')
+                        Content = @($SystemContent)
+                    }
+                }
+
+                # Custom:HyperionSoftwareSummary
+                if ($CombinedInventory.Software) {
+                    $SoftwareSummary = @{
+                        TotalApplications = $CombinedInventory.Software.Summary.TotalApplications.ToString()
+                        TotalHotfixes = $CombinedInventory.Software.Summary.TotalHotfixes.ToString()
+                        TotalChocolateyPackages = $CombinedInventory.Software.Summary.TotalChocolateyPackages.ToString()
+                    }
+
+                    $InventoryItems += @{
+                        TypeName = 'Custom:HyperionSoftwareSummary'
+                        SchemaVersion = '1.0'
+                        CaptureTime = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssZ')
+                        Content = @($SoftwareSummary)
+                    }
+                }
+
+                # Put custom inventory
+                Write-Output "Putting custom inventory to SSM..."
+                foreach ($Item in $InventoryItems) {
+                    try {
+                        $Params = @{
+                            InstanceId = $InstanceId
+                            Items = @($Item)
+                            Region = $Region
+                        }
+                        Write-SSMInventory @Params
+                        Write-Output "  Uploaded: $($Item.TypeName)"
+                    } catch {
+                        Write-Warning "  Failed to upload $($Item.TypeName): $_"
+                    }
+                }
+
+                Write-Output ""
+                Write-Output "=== Inventory Collection Complete ==="
+                Write-Output "Instance: $InstanceId"
+                Write-Output "Combined inventory: $CombinedFile"
+
+                Write-Output ""
+                Write-Output "INVENTORY_STATUS=Complete"
+
+            } catch {
+                Write-Error "Inventory upload failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String

@@ -1,0 +1,770 @@
+---
+# Hyperion Fleet Manager - Apply DSC Configuration
+# SSM Automation Document for applying PowerShell DSC configurations
+#
+# This document downloads DSC configurations from S3, compiles them,
+# applies them to target instances, and reports compliance status.
+
+schemaVersion: "0.3"
+description: |
+  Apply PowerShell Desired State Configuration (DSC) to target Windows instances.
+  Downloads configuration from S3, installs required modules, compiles and applies
+  the configuration, then verifies compliance and reports results to CloudWatch.
+
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: "(Required) The ARN of the IAM role that allows Automation to perform actions on your behalf."
+    default: ""
+
+  ConfigurationName:
+    type: String
+    description: "(Required) Name of the DSC configuration to apply (e.g., WebServerConfig, BaselineConfig)."
+    allowedPattern: "^[a-zA-Z][a-zA-Z0-9_-]{1,63}$"
+
+  Environment:
+    type: String
+    description: "(Required) Target environment for the configuration."
+    allowedValues:
+      - dev
+      - staging
+      - prod
+    default: "dev"
+
+  S3ConfigBucket:
+    type: String
+    description: "(Required) S3 bucket containing DSC configurations and modules."
+    allowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+
+  S3KeyPrefix:
+    type: String
+    description: "(Optional) S3 key prefix for DSC configurations."
+    default: "dsc/configurations"
+
+  TargetInstances:
+    type: StringList
+    description: "(Required) List of target instance IDs to apply configuration."
+
+  RebootBehavior:
+    type: String
+    description: "(Optional) How to handle reboots required by DSC."
+    allowedValues:
+      - RebootIfNeeded
+      - NoReboot
+      - ForceReboot
+    default: "RebootIfNeeded"
+
+  ComplianceReportingEnabled:
+    type: String
+    description: "(Optional) Enable CloudWatch metrics reporting for compliance."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "true"
+
+  MaxConcurrency:
+    type: String
+    description: "(Optional) Maximum concurrent instances to configure."
+    default: "10"
+
+  MaxErrors:
+    type: String
+    description: "(Optional) Maximum errors before stopping automation."
+    default: "5"
+
+outputs:
+  - ApplyDSCConfiguration.Output
+  - VerifyCompliance.Output
+  - ReportResults.Output
+
+mainSteps:
+  - name: DownloadConfiguration
+    action: aws:runCommand
+    description: Download DSC configuration and required modules from S3.
+    timeoutSeconds: 600
+    maxAttempts: 3
+    onFailure: Abort
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Download DSC Configuration
+            $ErrorActionPreference = 'Stop'
+
+            # Configuration parameters
+            $ConfigName = '{{ ConfigurationName }}'
+            $Environment = '{{ Environment }}'
+            $S3Bucket = '{{ S3ConfigBucket }}'
+            $S3Prefix = '{{ S3KeyPrefix }}'
+
+            # Local paths
+            $DSCRoot = 'C:\HyperionFleet\DSC'
+            $ConfigPath = Join-Path $DSCRoot 'Configurations'
+            $ModulesPath = Join-Path $DSCRoot 'Modules'
+            $LogPath = Join-Path $DSCRoot 'Logs'
+
+            # Ensure directories exist
+            @($DSCRoot, $ConfigPath, $ModulesPath, $LogPath) | ForEach-Object {
+                if (-not (Test-Path $_)) {
+                    New-Item -Path $_ -ItemType Directory -Force | Out-Null
+                    Write-Output "Created directory: $_"
+                }
+            }
+
+            # Start logging
+            $LogFile = Join-Path $LogPath "dsc-download-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Downloading DSC Configuration: $ConfigName for $Environment ==="
+                Write-Output "S3 Source: s3://$S3Bucket/$S3Prefix/$Environment/$ConfigName"
+
+                # Download configuration script
+                $ConfigS3Key = "$S3Prefix/$Environment/$ConfigName/$ConfigName.ps1"
+                $LocalConfigFile = Join-Path $ConfigPath "$ConfigName.ps1"
+
+                Write-Output "Downloading configuration script..."
+                Read-S3Object -BucketName $S3Bucket -Key $ConfigS3Key -File $LocalConfigFile
+                Write-Output "Downloaded: $LocalConfigFile"
+
+                # Download configuration data if exists
+                $ConfigDataS3Key = "$S3Prefix/$Environment/$ConfigName/ConfigurationData.psd1"
+                $LocalConfigData = Join-Path $ConfigPath "ConfigurationData.psd1"
+
+                try {
+                    Read-S3Object -BucketName $S3Bucket -Key $ConfigDataS3Key -File $LocalConfigData
+                    Write-Output "Downloaded configuration data: $LocalConfigData"
+                } catch {
+                    Write-Output "No configuration data file found (optional)"
+                }
+
+                # Download required modules manifest
+                $ModulesManifestKey = "$S3Prefix/$Environment/$ConfigName/modules.json"
+                $ModulesManifestFile = Join-Path $ConfigPath "modules.json"
+
+                try {
+                    Read-S3Object -BucketName $S3Bucket -Key $ModulesManifestKey -File $ModulesManifestFile
+                    Write-Output "Downloaded modules manifest: $ModulesManifestFile"
+
+                    # Download each required module
+                    $ModulesManifest = Get-Content $ModulesManifestFile | ConvertFrom-Json
+                    foreach ($Module in $ModulesManifest.Modules) {
+                        $ModuleS3Key = "$S3Prefix/modules/$($Module.Name)/$($Module.Version)/$($Module.Name).zip"
+                        $LocalModuleZip = Join-Path $ModulesPath "$($Module.Name).zip"
+                        $LocalModulePath = Join-Path $ModulesPath $Module.Name
+
+                        Write-Output "Downloading module: $($Module.Name) v$($Module.Version)"
+                        Read-S3Object -BucketName $S3Bucket -Key $ModuleS3Key -File $LocalModuleZip
+
+                        # Extract module
+                        if (Test-Path $LocalModulePath) {
+                            Remove-Item -Path $LocalModulePath -Recurse -Force
+                        }
+                        Expand-Archive -Path $LocalModuleZip -DestinationPath $ModulesPath -Force
+                        Remove-Item -Path $LocalModuleZip -Force
+                        Write-Output "Installed module: $($Module.Name)"
+                    }
+                } catch {
+                    Write-Output "No modules manifest found, using installed modules"
+                }
+
+                Write-Output "=== Download Complete ==="
+                Write-Output "Configuration ready at: $LocalConfigFile"
+
+            } catch {
+                Write-Error "Download failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+
+  - name: InstallDSCModules
+    action: aws:runCommand
+    description: Install required DSC modules from PSGallery or local cache.
+    timeoutSeconds: 900
+    maxAttempts: 2
+    onFailure: Abort
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Install DSC Modules
+            $ErrorActionPreference = 'Stop'
+
+            $ConfigName = '{{ ConfigurationName }}'
+            $DSCRoot = 'C:\HyperionFleet\DSC'
+            $ConfigPath = Join-Path $DSCRoot 'Configurations'
+            $ModulesPath = Join-Path $DSCRoot 'Modules'
+            $LogPath = Join-Path $DSCRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "dsc-modules-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Installing DSC Modules ==="
+
+                # Add local modules path to PSModulePath if not present
+                $env:PSModulePath = "$ModulesPath;$env:PSModulePath"
+
+                # Core DSC modules required for most configurations
+                $CoreModules = @(
+                    @{ Name = 'PSDscResources'; MinVersion = '2.12.0.0' }
+                    @{ Name = 'ComputerManagementDsc'; MinVersion = '8.5.0' }
+                    @{ Name = 'SecurityPolicyDsc'; MinVersion = '2.10.0.0' }
+                    @{ Name = 'AuditPolicyDsc'; MinVersion = '1.4.0.0' }
+                    @{ Name = 'NetworkingDsc'; MinVersion = '9.0.0' }
+                )
+
+                # Read additional modules from manifest if exists
+                $ModulesManifestFile = Join-Path $ConfigPath "modules.json"
+                if (Test-Path $ModulesManifestFile) {
+                    $ManifestModules = (Get-Content $ModulesManifestFile | ConvertFrom-Json).Modules
+                    foreach ($Module in $ManifestModules) {
+                        if ($CoreModules.Name -notcontains $Module.Name) {
+                            $CoreModules += @{ Name = $Module.Name; MinVersion = $Module.Version }
+                        }
+                    }
+                }
+
+                # Ensure NuGet provider is available
+                $NuGet = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+                if (-not $NuGet -or $NuGet.Version -lt [version]'2.8.5.201') {
+                    Write-Output "Installing NuGet package provider..."
+                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers
+                }
+
+                # Set PSGallery as trusted
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+
+                # Install/Update modules
+                foreach ($ModuleSpec in $CoreModules) {
+                    $ModuleName = $ModuleSpec.Name
+                    $MinVersion = $ModuleSpec.MinVersion
+
+                    Write-Output "Checking module: $ModuleName (MinVersion: $MinVersion)"
+
+                    # Check if module exists locally first
+                    $LocalModule = Get-Module -Name $ModuleName -ListAvailable |
+                        Where-Object { $_.Version -ge [version]$MinVersion } |
+                        Sort-Object Version -Descending |
+                        Select-Object -First 1
+
+                    if ($LocalModule) {
+                        Write-Output "  Found local version: $($LocalModule.Version)"
+                    } else {
+                        Write-Output "  Installing from PSGallery..."
+                        try {
+                            Install-Module -Name $ModuleName -MinimumVersion $MinVersion -Force -AllowClobber -Scope AllUsers
+                            Write-Output "  Installed successfully"
+                        } catch {
+                            Write-Warning "  Failed to install $ModuleName from PSGallery: $_"
+                            # Check if we have a local cached version
+                            $CachedModule = Join-Path $ModulesPath $ModuleName
+                            if (Test-Path $CachedModule) {
+                                Write-Output "  Using cached version from $CachedModule"
+                            } else {
+                                throw "Module $ModuleName not available"
+                            }
+                        }
+                    }
+                }
+
+                Write-Output ""
+                Write-Output "=== Installed DSC Modules ==="
+                Get-DscResource | Select-Object Name, Module, Version | Format-Table -AutoSize
+
+            } catch {
+                Write-Error "Module installation failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+
+  - name: CompileConfiguration
+    action: aws:runCommand
+    description: Compile DSC configuration to MOF files.
+    timeoutSeconds: 600
+    maxAttempts: 2
+    onFailure: Abort
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Compile DSC Configuration
+            $ErrorActionPreference = 'Stop'
+
+            $ConfigName = '{{ ConfigurationName }}'
+            $Environment = '{{ Environment }}'
+            $DSCRoot = 'C:\HyperionFleet\DSC'
+            $ConfigPath = Join-Path $DSCRoot 'Configurations'
+            $ModulesPath = Join-Path $DSCRoot 'Modules'
+            $MOFPath = Join-Path $DSCRoot 'MOF'
+            $LogPath = Join-Path $DSCRoot 'Logs'
+
+            # Ensure MOF directory exists
+            if (-not (Test-Path $MOFPath)) {
+                New-Item -Path $MOFPath -ItemType Directory -Force | Out-Null
+            }
+
+            # Add local modules to path
+            $env:PSModulePath = "$ModulesPath;$env:PSModulePath"
+
+            $LogFile = Join-Path $LogPath "dsc-compile-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Compiling DSC Configuration: $ConfigName ==="
+
+                $ConfigFile = Join-Path $ConfigPath "$ConfigName.ps1"
+                $ConfigDataFile = Join-Path $ConfigPath "ConfigurationData.psd1"
+
+                if (-not (Test-Path $ConfigFile)) {
+                    throw "Configuration file not found: $ConfigFile"
+                }
+
+                # Dot-source the configuration
+                Write-Output "Loading configuration from: $ConfigFile"
+                . $ConfigFile
+
+                # Build compilation parameters
+                $CompileParams = @{
+                    OutputPath = $MOFPath
+                }
+
+                # Add configuration data if available
+                if (Test-Path $ConfigDataFile) {
+                    Write-Output "Loading configuration data from: $ConfigDataFile"
+                    $ConfigData = Import-PowerShellDataFile -Path $ConfigDataFile
+
+                    # Update node name to localhost for local application
+                    if ($ConfigData.AllNodes) {
+                        foreach ($Node in $ConfigData.AllNodes) {
+                            if ($Node.NodeName -ne '*') {
+                                $Node.NodeName = 'localhost'
+                            }
+                        }
+                    }
+                    $CompileParams['ConfigurationData'] = $ConfigData
+                }
+
+                # Compile the configuration
+                Write-Output "Compiling configuration..."
+                $MOFOutput = & $ConfigName @CompileParams
+
+                if (-not $MOFOutput -or -not (Test-Path (Join-Path $MOFPath 'localhost.mof'))) {
+                    throw "MOF compilation failed - no output generated"
+                }
+
+                Write-Output "=== Compilation Successful ==="
+                Write-Output "MOF file generated: $(Join-Path $MOFPath 'localhost.mof')"
+
+                # Display MOF file info
+                $MOFFile = Get-Item (Join-Path $MOFPath 'localhost.mof')
+                Write-Output "MOF Size: $($MOFFile.Length) bytes"
+                Write-Output "MOF Modified: $($MOFFile.LastWriteTime)"
+
+            } catch {
+                Write-Error "Compilation failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+
+  - name: ApplyDSCConfiguration
+    action: aws:runCommand
+    description: Apply compiled DSC configuration using Start-DscConfiguration.
+    timeoutSeconds: 1800
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Apply DSC Configuration
+            $ErrorActionPreference = 'Stop'
+
+            $ConfigName = '{{ ConfigurationName }}'
+            $RebootBehavior = '{{ RebootBehavior }}'
+            $DSCRoot = 'C:\HyperionFleet\DSC'
+            $MOFPath = Join-Path $DSCRoot 'MOF'
+            $LogPath = Join-Path $DSCRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "dsc-apply-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Applying DSC Configuration: $ConfigName ==="
+                Write-Output "Reboot Behavior: $RebootBehavior"
+                Write-Output "MOF Path: $MOFPath"
+
+                $MOFFile = Join-Path $MOFPath 'localhost.mof'
+                if (-not (Test-Path $MOFFile)) {
+                    throw "MOF file not found: $MOFFile"
+                }
+
+                # Configure LCM settings based on reboot behavior
+                Write-Output "Configuring Local Configuration Manager..."
+                $LCMConfig = @{
+                    RefreshMode = 'Push'
+                    ConfigurationMode = 'ApplyAndAutoCorrect'
+                    ConfigurationModeFrequencyMins = 15
+                    RefreshFrequencyMins = 30
+                    RebootNodeIfNeeded = ($RebootBehavior -eq 'RebootIfNeeded' -or $RebootBehavior -eq 'ForceReboot')
+                    ActionAfterReboot = 'ContinueConfiguration'
+                    AllowModuleOverwrite = $true
+                }
+
+                # Create LCM configuration
+                [DSCLocalConfigurationManager()]
+                Configuration LCMConfig {
+                    Node localhost {
+                        Settings {
+                            RefreshMode = 'Push'
+                            ConfigurationMode = 'ApplyAndAutoCorrect'
+                            ConfigurationModeFrequencyMins = 15
+                            RefreshFrequencyMins = 30
+                            RebootNodeIfNeeded = $using:LCMConfig.RebootNodeIfNeeded
+                            ActionAfterReboot = 'ContinueConfiguration'
+                            AllowModuleOverwrite = $true
+                        }
+                    }
+                }
+
+                $LCMMOFPath = Join-Path $DSCRoot 'LCM'
+                if (-not (Test-Path $LCMMOFPath)) {
+                    New-Item -Path $LCMMOFPath -ItemType Directory -Force | Out-Null
+                }
+
+                LCMConfig -OutputPath $LCMMOFPath
+                Set-DscLocalConfigurationManager -Path $LCMMOFPath -Force
+
+                Write-Output "LCM configured successfully"
+                Get-DscLocalConfigurationManager | Format-List
+
+                # Apply the configuration
+                Write-Output ""
+                Write-Output "Starting DSC configuration application..."
+                $StartTime = Get-Date
+
+                Start-DscConfiguration -Path $MOFPath -Wait -Verbose -Force
+
+                $EndTime = Get-Date
+                $Duration = $EndTime - $StartTime
+
+                Write-Output ""
+                Write-Output "=== Configuration Applied ==="
+                Write-Output "Duration: $($Duration.TotalMinutes.ToString('F2')) minutes"
+
+                # Check if reboot is pending
+                $PendingReboot = $false
+                $RebootRequired = Get-DscLocalConfigurationManager | Select-Object -ExpandProperty LCMState
+
+                if ($RebootRequired -eq 'PendingReboot') {
+                    $PendingReboot = $true
+                    Write-Output "NOTICE: Reboot is pending"
+
+                    if ($RebootBehavior -eq 'ForceReboot') {
+                        Write-Output "Initiating forced reboot..."
+                        Restart-Computer -Force
+                    } elseif ($RebootBehavior -eq 'NoReboot') {
+                        Write-Warning "Reboot required but suppressed by RebootBehavior setting"
+                    }
+                }
+
+                # Store application result for later verification
+                $Result = @{
+                    ConfigurationName = $ConfigName
+                    AppliedAt = $EndTime.ToString('o')
+                    Duration = $Duration.TotalSeconds
+                    PendingReboot = $PendingReboot
+                    LCMState = $RebootRequired
+                }
+
+                $ResultFile = Join-Path $LogPath 'last-apply-result.json'
+                $Result | ConvertTo-Json | Set-Content -Path $ResultFile
+
+            } catch {
+                Write-Error "Configuration application failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: VerifyCompliance
+    action: aws:runCommand
+    description: Verify configuration compliance using Test-DscConfiguration.
+    timeoutSeconds: 600
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Verify DSC Compliance
+            $ErrorActionPreference = 'Stop'
+
+            $ConfigName = '{{ ConfigurationName }}'
+            $Environment = '{{ Environment }}'
+            $DSCRoot = 'C:\HyperionFleet\DSC'
+            $LogPath = Join-Path $DSCRoot 'Logs'
+            $ReportsPath = Join-Path $DSCRoot 'Reports'
+
+            if (-not (Test-Path $ReportsPath)) {
+                New-Item -Path $ReportsPath -ItemType Directory -Force | Out-Null
+            }
+
+            $LogFile = Join-Path $LogPath "dsc-verify-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Verifying DSC Compliance ==="
+                Write-Output "Configuration: $ConfigName"
+                Write-Output "Environment: $Environment"
+
+                # Run compliance test
+                Write-Output ""
+                Write-Output "Running Test-DscConfiguration..."
+                $TestResult = Test-DscConfiguration -Detailed
+
+                Write-Output ""
+                Write-Output "=== Compliance Results ==="
+                Write-Output "In Desired State: $($TestResult.InDesiredState)"
+                Write-Output "Resources in Desired State: $($TestResult.ResourcesInDesiredState.Count)"
+                Write-Output "Resources NOT in Desired State: $($TestResult.ResourcesNotInDesiredState.Count)"
+
+                # Display non-compliant resources
+                if ($TestResult.ResourcesNotInDesiredState.Count -gt 0) {
+                    Write-Output ""
+                    Write-Output "=== Non-Compliant Resources ==="
+                    foreach ($Resource in $TestResult.ResourcesNotInDesiredState) {
+                        Write-Output "  Resource: $($Resource.ResourceId)"
+                        Write-Output "  Type: $($Resource.ResourceType)"
+                        Write-Output "  Desired: $($Resource.DesiredState | ConvertTo-Json -Compress)"
+                        Write-Output "  Actual: $($Resource.ActualState | ConvertTo-Json -Compress)"
+                        Write-Output "  ---"
+                    }
+                }
+
+                # Generate compliance report
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $Report = @{
+                    InstanceId = $InstanceId
+                    ConfigurationName = $ConfigName
+                    Environment = $Environment
+                    Timestamp = (Get-Date).ToString('o')
+                    InDesiredState = $TestResult.InDesiredState
+                    TotalResources = $TestResult.ResourcesInDesiredState.Count + $TestResult.ResourcesNotInDesiredState.Count
+                    CompliantResources = $TestResult.ResourcesInDesiredState.Count
+                    NonCompliantResources = $TestResult.ResourcesNotInDesiredState.Count
+                    CompliancePercentage = 0
+                    NonCompliantDetails = @()
+                }
+
+                if ($Report.TotalResources -gt 0) {
+                    $Report.CompliancePercentage = [math]::Round(($Report.CompliantResources / $Report.TotalResources) * 100, 2)
+                }
+
+                foreach ($Resource in $TestResult.ResourcesNotInDesiredState) {
+                    $Report.NonCompliantDetails += @{
+                        ResourceId = $Resource.ResourceId
+                        ResourceType = $Resource.ResourceType
+                        InDesiredState = $false
+                    }
+                }
+
+                # Save report
+                $ReportFile = Join-Path $ReportsPath "compliance-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
+                $Report | ConvertTo-Json -Depth 5 | Set-Content -Path $ReportFile
+                Write-Output ""
+                Write-Output "Compliance report saved: $ReportFile"
+
+                # Output for SSM
+                Write-Output ""
+                Write-Output "COMPLIANCE_STATUS=$($TestResult.InDesiredState)"
+                Write-Output "COMPLIANCE_PERCENTAGE=$($Report.CompliancePercentage)"
+
+                # Return non-zero if not compliant (for alerting)
+                if (-not $TestResult.InDesiredState) {
+                    Write-Warning "System is NOT in desired state"
+                }
+
+            } catch {
+                Write-Error "Compliance verification failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: ReportResults
+    action: aws:runCommand
+    description: Report compliance results to CloudWatch metrics and logs.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Report Results to CloudWatch
+            $ErrorActionPreference = 'Stop'
+
+            $ConfigName = '{{ ConfigurationName }}'
+            $Environment = '{{ Environment }}'
+            $ComplianceReporting = '{{ ComplianceReportingEnabled }}'
+            $DSCRoot = 'C:\HyperionFleet\DSC'
+            $ReportsPath = Join-Path $DSCRoot 'Reports'
+            $LogPath = Join-Path $DSCRoot 'Logs'
+
+            $LogFile = Join-Path $LogPath "dsc-report-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Reporting Results to CloudWatch ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+
+                # Get latest compliance report
+                $LatestReport = Get-ChildItem -Path $ReportsPath -Filter 'compliance-*.json' |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -First 1
+
+                if (-not $LatestReport) {
+                    throw "No compliance report found"
+                }
+
+                $Report = Get-Content $LatestReport.FullName | ConvertFrom-Json
+
+                Write-Output "Instance: $InstanceId"
+                Write-Output "Region: $Region"
+                Write-Output "Configuration: $ConfigName"
+                Write-Output "Compliance: $($Report.CompliancePercentage)%"
+
+                if ($ComplianceReporting -eq 'true') {
+                    Write-Output ""
+                    Write-Output "Publishing CloudWatch metrics..."
+
+                    # Prepare CloudWatch metrics
+                    $Namespace = 'HyperionFleet/DSC'
+                    $Dimensions = @(
+                        @{ Name = 'InstanceId'; Value = $InstanceId }
+                        @{ Name = 'Environment'; Value = $Environment }
+                        @{ Name = 'ConfigurationName'; Value = $ConfigName }
+                    )
+
+                    # Publish compliance percentage
+                    $MetricData = @(
+                        @{
+                            MetricName = 'CompliancePercentage'
+                            Value = $Report.CompliancePercentage
+                            Unit = 'Percent'
+                            Dimensions = $Dimensions
+                        }
+                        @{
+                            MetricName = 'CompliantResources'
+                            Value = $Report.CompliantResources
+                            Unit = 'Count'
+                            Dimensions = $Dimensions
+                        }
+                        @{
+                            MetricName = 'NonCompliantResources'
+                            Value = $Report.NonCompliantResources
+                            Unit = 'Count'
+                            Dimensions = $Dimensions
+                        }
+                        @{
+                            MetricName = 'InDesiredState'
+                            Value = if ($Report.InDesiredState) { 1 } else { 0 }
+                            Unit = 'Count'
+                            Dimensions = $Dimensions
+                        }
+                    )
+
+                    foreach ($Metric in $MetricData) {
+                        Write-CloudWatchMetricData -Namespace $Namespace -MetricData $Metric -Region $Region
+                        Write-Output "  Published: $($Metric.MetricName) = $($Metric.Value)"
+                    }
+
+                    # Publish log event
+                    Write-Output ""
+                    Write-Output "Publishing CloudWatch log event..."
+
+                    $LogGroupName = "/hyperion-fleet/dsc/$Environment"
+                    $LogStreamName = "$InstanceId/$ConfigName"
+
+                    # Ensure log group exists
+                    try {
+                        New-CWLLogGroup -LogGroupName $LogGroupName -Region $Region -ErrorAction SilentlyContinue
+                    } catch { }
+
+                    # Ensure log stream exists
+                    try {
+                        New-CWLLogStream -LogGroupName $LogGroupName -LogStreamName $LogStreamName -Region $Region -ErrorAction SilentlyContinue
+                    } catch { }
+
+                    # Put log event
+                    $LogEvent = @{
+                        Timestamp = [DateTime]::UtcNow
+                        Message = ($Report | ConvertTo-Json -Compress)
+                    }
+
+                    Write-CWLLogEvent -LogGroupName $LogGroupName -LogStreamName $LogStreamName -LogEvent $LogEvent -Region $Region
+                    Write-Output "  Log event published to $LogGroupName/$LogStreamName"
+
+                } else {
+                    Write-Output "CloudWatch reporting disabled"
+                }
+
+                Write-Output ""
+                Write-Output "=== DSC Configuration Complete ==="
+                Write-Output "Configuration: $ConfigName"
+                Write-Output "Status: $(if ($Report.InDesiredState) { 'COMPLIANT' } else { 'NON-COMPLIANT' })"
+                Write-Output "Compliance: $($Report.CompliancePercentage)%"
+
+            } catch {
+                Write-Error "Reporting failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String

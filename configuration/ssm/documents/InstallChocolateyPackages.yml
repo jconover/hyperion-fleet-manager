@@ -1,0 +1,731 @@
+---
+# Hyperion Fleet Manager - Install Chocolatey Packages
+# SSM Automation Document for managing Chocolatey packages on Windows instances
+#
+# This document ensures Chocolatey is installed, then installs or upgrades
+# specified packages with verification and reporting.
+
+schemaVersion: "0.3"
+description: |
+  Install or upgrade Chocolatey packages on target Windows instances.
+  Ensures Chocolatey is installed, processes package list, verifies installation,
+  and reports results to CloudWatch.
+
+assumeRole: "{{ AutomationAssumeRole }}"
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: "(Required) The ARN of the IAM role that allows Automation to perform actions on your behalf."
+    default: ""
+
+  TargetInstances:
+    type: StringList
+    description: "(Required) List of target instance IDs."
+
+  Packages:
+    type: String
+    description: "(Required) Comma-separated list of Chocolatey packages to install/upgrade (e.g., 'git,nodejs,vscode')."
+    allowedPattern: "^[a-zA-Z0-9._-]+(,[a-zA-Z0-9._-]+)*$"
+
+  Action:
+    type: String
+    description: "(Required) Action to perform on packages."
+    allowedValues:
+      - install
+      - upgrade
+      - uninstall
+    default: "install"
+
+  PackageSource:
+    type: String
+    description: "(Optional) Chocolatey source to use (default: chocolatey.org)."
+    default: ""
+
+  AllowPrerelease:
+    type: String
+    description: "(Optional) Allow prerelease package versions."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "false"
+
+  IgnoreChecksums:
+    type: String
+    description: "(Optional) Ignore package checksums (not recommended for production)."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "false"
+
+  ForceReinstall:
+    type: String
+    description: "(Optional) Force reinstallation even if package is already installed."
+    allowedValues:
+      - "true"
+      - "false"
+    default: "false"
+
+  Environment:
+    type: String
+    description: "(Required) Environment identifier."
+    allowedValues:
+      - dev
+      - staging
+      - prod
+    default: "dev"
+
+  MaxConcurrency:
+    type: String
+    description: "(Optional) Maximum concurrent instances."
+    default: "10"
+
+  MaxErrors:
+    type: String
+    description: "(Optional) Maximum errors before stopping automation."
+    default: "5"
+
+outputs:
+  - EnsureChocolatey.Output
+  - ProcessPackages.Output
+  - VerifyInstallation.Output
+  - ReportResults.Output
+
+mainSteps:
+  - name: EnsureChocolatey
+    action: aws:runCommand
+    description: Ensure Chocolatey is installed on target instances.
+    timeoutSeconds: 600
+    maxAttempts: 2
+    onFailure: Abort
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Ensure Chocolatey Installed
+            $ErrorActionPreference = 'Stop'
+
+            $Environment = '{{ Environment }}'
+
+            # Setup paths
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ChocolateyRoot = Join-Path $HyperionRoot 'Chocolatey'
+            $LogPath = Join-Path $ChocolateyRoot 'Logs'
+            $ReportsPath = Join-Path $ChocolateyRoot 'Reports'
+
+            @($ChocolateyRoot, $LogPath, $ReportsPath) | ForEach-Object {
+                if (-not (Test-Path $_)) {
+                    New-Item -Path $_ -ItemType Directory -Force | Out-Null
+                }
+            }
+
+            $LogFile = Join-Path $LogPath "choco-ensure-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Ensuring Chocolatey Installation ==="
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+                Write-Output "Environment: $Environment"
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Check if Chocolatey is already installed
+                $ChocoPath = "$env:ProgramData\chocolatey\bin\choco.exe"
+
+                if (Test-Path $ChocoPath) {
+                    $ChocoVersion = & $ChocoPath --version 2>$null
+                    Write-Output "Chocolatey already installed: v$ChocoVersion"
+
+                    # Check if upgrade is needed
+                    try {
+                        $ChocoOutdated = & $ChocoPath outdated chocolatey --limit-output 2>$null
+                        if ($ChocoOutdated) {
+                            Write-Output "Upgrading Chocolatey..."
+                            & $ChocoPath upgrade chocolatey -y --no-progress
+                            $ChocoVersion = & $ChocoPath --version 2>$null
+                            Write-Output "Chocolatey upgraded to: v$ChocoVersion"
+                        }
+                    } catch {
+                        Write-Output "Could not check for Chocolatey updates: $_"
+                    }
+                } else {
+                    Write-Output "Installing Chocolatey..."
+
+                    # Set execution policy for installation
+                    Set-ExecutionPolicy Bypass -Scope Process -Force
+
+                    # Set security protocol
+                    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+
+                    # Download and execute Chocolatey installer
+                    $InstallScript = (New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')
+                    Invoke-Expression $InstallScript
+
+                    # Refresh environment
+                    $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+
+                    # Verify installation
+                    if (Test-Path $ChocoPath) {
+                        $ChocoVersion = & $ChocoPath --version 2>$null
+                        Write-Output "Chocolatey installed successfully: v$ChocoVersion"
+                    } else {
+                        throw "Chocolatey installation failed - choco.exe not found"
+                    }
+                }
+
+                # Configure Chocolatey for enterprise use
+                Write-Output ""
+                Write-Output "Configuring Chocolatey..."
+
+                # Enable global confirmation
+                & $ChocoPath feature enable -n=allowGlobalConfirmation 2>$null
+
+                # Set cache location
+                $CachePath = Join-Path $ChocolateyRoot 'Cache'
+                if (-not (Test-Path $CachePath)) {
+                    New-Item -Path $CachePath -ItemType Directory -Force | Out-Null
+                }
+                & $ChocoPath config set cacheLocation $CachePath 2>$null
+
+                # Log configuration
+                & $ChocoPath config set logDirectory $LogPath 2>$null
+
+                Write-Output "Chocolatey configuration complete"
+
+                # Save installation info
+                $InstallInfo = @{
+                    InstanceId = $InstanceId
+                    Timestamp = (Get-Date).ToString('o')
+                    ChocolateyVersion = $ChocoVersion
+                    InstallPath = "$env:ProgramData\chocolatey"
+                    CachePath = $CachePath
+                    LogPath = $LogPath
+                }
+
+                $InstallInfoFile = Join-Path $ReportsPath 'chocolatey-info.json'
+                $InstallInfo | ConvertTo-Json | Set-Content -Path $InstallInfoFile
+
+                Write-Output ""
+                Write-Output "CHOCOLATEY_VERSION=$ChocoVersion"
+                Write-Output "CHOCOLATEY_STATUS=Ready"
+
+            } catch {
+                Write-Error "Chocolatey installation failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: ProcessPackages
+    action: aws:runCommand
+    description: Install or upgrade specified Chocolatey packages.
+    timeoutSeconds: 3600
+    maxAttempts: 1
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Process Chocolatey Packages
+            $ErrorActionPreference = 'Stop'
+
+            $Packages = '{{ Packages }}'
+            $Action = '{{ Action }}'
+            $PackageSource = '{{ PackageSource }}'
+            $AllowPrerelease = '{{ AllowPrerelease }}'
+            $IgnoreChecksums = '{{ IgnoreChecksums }}'
+            $ForceReinstall = '{{ ForceReinstall }}'
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ChocolateyRoot = Join-Path $HyperionRoot 'Chocolatey'
+            $LogPath = Join-Path $ChocolateyRoot 'Logs'
+            $ReportsPath = Join-Path $ChocolateyRoot 'Reports'
+
+            $LogFile = Join-Path $LogPath "choco-$Action-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Processing Chocolatey Packages ==="
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+                Write-Output "Action: $Action"
+                Write-Output "Packages: $Packages"
+                Write-Output "Environment: $Environment"
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Initialize result tracking
+                $ProcessResult = @{
+                    InstanceId = $InstanceId
+                    Timestamp = (Get-Date).ToString('o')
+                    Action = $Action
+                    Environment = $Environment
+                    TotalPackages = 0
+                    SuccessCount = 0
+                    FailureCount = 0
+                    SkippedCount = 0
+                    Packages = @()
+                }
+
+                # Parse package list
+                $PackageList = $Packages -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                $ProcessResult.TotalPackages = $PackageList.Count
+
+                Write-Output ""
+                Write-Output "Processing $($PackageList.Count) package(s)..."
+
+                # Build base Chocolatey arguments
+                $BaseArgs = @()
+
+                if ($PackageSource) {
+                    $BaseArgs += "--source=$PackageSource"
+                }
+
+                if ($AllowPrerelease -eq 'true') {
+                    $BaseArgs += '--prerelease'
+                }
+
+                if ($IgnoreChecksums -eq 'true') {
+                    $BaseArgs += '--ignore-checksums'
+                    Write-Warning "Checksum verification disabled - not recommended for production"
+                }
+
+                if ($ForceReinstall -eq 'true' -and $Action -eq 'install') {
+                    $BaseArgs += '--force'
+                }
+
+                # Common args for all actions
+                $BaseArgs += '--no-progress'
+                $BaseArgs += '--limit-output'
+
+                # Get currently installed packages for reference
+                $InstalledPackages = choco list --local-only --limit-output 2>$null |
+                    ConvertFrom-Csv -Header Name, Version -Delimiter '|'
+
+                # Process each package
+                foreach ($Package in $PackageList) {
+                    Write-Output ""
+                    Write-Output "--- Processing: $Package ---"
+
+                    $PackageResult = @{
+                        Name = $Package
+                        Action = $Action
+                        Status = 'Pending'
+                        PreviousVersion = $null
+                        NewVersion = $null
+                        Duration = 0
+                        Output = ''
+                        Error = $null
+                    }
+
+                    # Check current installation status
+                    $CurrentInstall = $InstalledPackages | Where-Object { $_.Name -eq $Package }
+                    if ($CurrentInstall) {
+                        $PackageResult.PreviousVersion = $CurrentInstall.Version
+                        Write-Output "  Currently installed: v$($CurrentInstall.Version)"
+                    } else {
+                        Write-Output "  Not currently installed"
+                    }
+
+                    # Build action-specific command
+                    $ActionArgs = @()
+
+                    switch ($Action) {
+                        'install' {
+                            if ($CurrentInstall -and $ForceReinstall -ne 'true') {
+                                Write-Output "  Package already installed, skipping"
+                                $PackageResult.Status = 'Skipped'
+                                $PackageResult.NewVersion = $CurrentInstall.Version
+                                $ProcessResult.SkippedCount++
+                            } else {
+                                $ActionArgs = @('install', $Package) + $BaseArgs + @('-y')
+                            }
+                        }
+                        'upgrade' {
+                            if (-not $CurrentInstall) {
+                                Write-Output "  Package not installed, installing instead"
+                                $ActionArgs = @('install', $Package) + $BaseArgs + @('-y')
+                            } else {
+                                $ActionArgs = @('upgrade', $Package) + $BaseArgs + @('-y')
+                            }
+                        }
+                        'uninstall' {
+                            if (-not $CurrentInstall) {
+                                Write-Output "  Package not installed, skipping"
+                                $PackageResult.Status = 'Skipped'
+                                $ProcessResult.SkippedCount++
+                            } else {
+                                $ActionArgs = @('uninstall', $Package) + $BaseArgs + @('-y', '--remove-dependencies')
+                            }
+                        }
+                    }
+
+                    # Execute Chocolatey command if needed
+                    if ($ActionArgs.Count -gt 0) {
+                        $StartTime = Get-Date
+
+                        try {
+                            Write-Output "  Executing: choco $($ActionArgs -join ' ')"
+
+                            $ChocoOutput = & choco @ActionArgs 2>&1
+
+                            $EndTime = Get-Date
+                            $PackageResult.Duration = ($EndTime - $StartTime).TotalSeconds
+                            $PackageResult.Output = $ChocoOutput -join "`n"
+
+                            # Check exit code
+                            if ($LASTEXITCODE -eq 0) {
+                                $PackageResult.Status = 'Success'
+                                $ProcessResult.SuccessCount++
+
+                                # Get new version if installed/upgraded
+                                if ($Action -ne 'uninstall') {
+                                    $NewInstall = choco list $Package --local-only --limit-output 2>$null |
+                                        ConvertFrom-Csv -Header Name, Version -Delimiter '|'
+                                    if ($NewInstall) {
+                                        $PackageResult.NewVersion = $NewInstall.Version
+                                    }
+                                }
+
+                                Write-Output "  [SUCCESS] $($PackageResult.NewVersion)"
+                            } else {
+                                $PackageResult.Status = 'Failed'
+                                $PackageResult.Error = "Exit code: $LASTEXITCODE"
+                                $ProcessResult.FailureCount++
+                                Write-Output "  [FAILED] Exit code: $LASTEXITCODE"
+                            }
+                        } catch {
+                            $PackageResult.Status = 'Failed'
+                            $PackageResult.Error = $_.Exception.Message
+                            $ProcessResult.FailureCount++
+                            Write-Output "  [FAILED] $_"
+                        }
+                    }
+
+                    $ProcessResult.Packages += $PackageResult
+                }
+
+                # Save process result
+                $ProcessResultFile = Join-Path $ReportsPath 'package-process-result.json'
+                $ProcessResult | ConvertTo-Json -Depth 10 | Set-Content -Path $ProcessResultFile
+
+                Write-Output ""
+                Write-Output "=== Package Processing Summary ==="
+                Write-Output "Total: $($ProcessResult.TotalPackages)"
+                Write-Output "Success: $($ProcessResult.SuccessCount)"
+                Write-Output "Failed: $($ProcessResult.FailureCount)"
+                Write-Output "Skipped: $($ProcessResult.SkippedCount)"
+
+                Write-Output ""
+                Write-Output "PROCESS_STATUS=$(if ($ProcessResult.FailureCount -eq 0) { 'Success' } else { 'PartialFailure' })"
+                Write-Output "SUCCESS_COUNT=$($ProcessResult.SuccessCount)"
+                Write-Output "FAILURE_COUNT=$($ProcessResult.FailureCount)"
+
+            } catch {
+                Write-Error "Package processing failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: VerifyInstallation
+    action: aws:runCommand
+    description: Verify package installation and collect inventory.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Verify Package Installation
+            $ErrorActionPreference = 'Stop'
+
+            $Packages = '{{ Packages }}'
+            $Action = '{{ Action }}'
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ChocolateyRoot = Join-Path $HyperionRoot 'Chocolatey'
+            $LogPath = Join-Path $ChocolateyRoot 'Logs'
+            $ReportsPath = Join-Path $ChocolateyRoot 'Reports'
+
+            $LogFile = Join-Path $LogPath "choco-verify-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Verifying Package Installation ==="
+                Write-Output "Timestamp: $(Get-Date -Format 'o')"
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                Write-Output "Instance ID: $InstanceId"
+
+                # Parse package list
+                $PackageList = $Packages -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+                # Initialize verification result
+                $VerifyResult = @{
+                    InstanceId = $InstanceId
+                    Timestamp = (Get-Date).ToString('o')
+                    Environment = $Environment
+                    PackagesVerified = @()
+                    AllInstalled = $true
+                    InstalledPackages = @()
+                }
+
+                Write-Output ""
+                Write-Output "Verifying requested packages..."
+
+                foreach ($Package in $PackageList) {
+                    $Installed = choco list $Package --local-only --exact --limit-output 2>$null |
+                        ConvertFrom-Csv -Header Name, Version -Delimiter '|'
+
+                    $VerifyInfo = @{
+                        Name = $Package
+                        Installed = $false
+                        Version = $null
+                    }
+
+                    if ($Installed) {
+                        $VerifyInfo.Installed = $true
+                        $VerifyInfo.Version = $Installed.Version
+                        Write-Output "  [VERIFIED] $Package v$($Installed.Version)"
+                    } else {
+                        if ($Action -eq 'uninstall') {
+                            Write-Output "  [VERIFIED] $Package - uninstalled"
+                        } else {
+                            $VerifyInfo.Installed = $false
+                            $VerifyResult.AllInstalled = $false
+                            Write-Output "  [MISSING] $Package"
+                        }
+                    }
+
+                    $VerifyResult.PackagesVerified += $VerifyInfo
+                }
+
+                # Get full package inventory
+                Write-Output ""
+                Write-Output "Collecting full package inventory..."
+
+                $AllPackages = choco list --local-only --limit-output 2>$null |
+                    ConvertFrom-Csv -Header Name, Version -Delimiter '|'
+
+                foreach ($Pkg in $AllPackages) {
+                    $VerifyResult.InstalledPackages += @{
+                        Name = $Pkg.Name
+                        Version = $Pkg.Version
+                    }
+                }
+
+                Write-Output "Total installed packages: $($VerifyResult.InstalledPackages.Count)"
+
+                # Check for outdated packages
+                Write-Output ""
+                Write-Output "Checking for outdated packages..."
+
+                $OutdatedPackages = @()
+                try {
+                    $Outdated = choco outdated --limit-output 2>$null |
+                        ConvertFrom-Csv -Header Name, CurrentVersion, AvailableVersion, Pinned -Delimiter '|'
+
+                    foreach ($Pkg in $Outdated) {
+                        $OutdatedPackages += @{
+                            Name = $Pkg.Name
+                            CurrentVersion = $Pkg.CurrentVersion
+                            AvailableVersion = $Pkg.AvailableVersion
+                            Pinned = $Pkg.Pinned -eq 'true'
+                        }
+                    }
+                } catch {
+                    Write-Output "Could not check for outdated packages: $_"
+                }
+
+                $VerifyResult.OutdatedPackages = $OutdatedPackages
+                Write-Output "Outdated packages: $($OutdatedPackages.Count)"
+
+                # Save verification result
+                $VerifyResultFile = Join-Path $ReportsPath 'package-verify-result.json'
+                $VerifyResult | ConvertTo-Json -Depth 10 | Set-Content -Path $VerifyResultFile
+
+                Write-Output ""
+                Write-Output "=== Verification Summary ==="
+                Write-Output "Packages Checked: $($PackageList.Count)"
+                Write-Output "All Installed: $($VerifyResult.AllInstalled)"
+                Write-Output "Total Packages: $($VerifyResult.InstalledPackages.Count)"
+                Write-Output "Outdated: $($VerifyResult.OutdatedPackages.Count)"
+
+                Write-Output ""
+                Write-Output "VERIFY_STATUS=$(if ($VerifyResult.AllInstalled) { 'Success' } else { 'Incomplete' })"
+
+            } catch {
+                Write-Error "Verification failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
+
+  - name: ReportResults
+    action: aws:runCommand
+    description: Report package management results to CloudWatch.
+    timeoutSeconds: 300
+    maxAttempts: 2
+    onFailure: Continue
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunPowerShellScript
+      InstanceIds: "{{ TargetInstances }}"
+      MaxConcurrency: "{{ MaxConcurrency }}"
+      MaxErrors: "{{ MaxErrors }}"
+      Parameters:
+        commands:
+          - |
+            # Hyperion Fleet Manager - Report Package Results
+            $ErrorActionPreference = 'Stop'
+
+            $Packages = '{{ Packages }}'
+            $Action = '{{ Action }}'
+            $Environment = '{{ Environment }}'
+
+            $HyperionRoot = 'C:\HyperionFleet'
+            $ChocolateyRoot = Join-Path $HyperionRoot 'Chocolatey'
+            $LogPath = Join-Path $ChocolateyRoot 'Logs'
+            $ReportsPath = Join-Path $ChocolateyRoot 'Reports'
+
+            $LogFile = Join-Path $LogPath "choco-report-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+            Start-Transcript -Path $LogFile -Append
+
+            try {
+                Write-Output "=== Reporting Package Results ==="
+
+                # Get instance metadata
+                $InstanceId = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -TimeoutSec 2)
+                $AvailabilityZone = (Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/availability-zone' -TimeoutSec 2)
+                $Region = $AvailabilityZone.Substring(0, $AvailabilityZone.Length - 1)
+
+                # Load results
+                $ProcessResult = Get-Content (Join-Path $ReportsPath 'package-process-result.json') -ErrorAction SilentlyContinue | ConvertFrom-Json
+                $VerifyResult = Get-Content (Join-Path $ReportsPath 'package-verify-result.json') -ErrorAction SilentlyContinue | ConvertFrom-Json
+
+                # Generate final report
+                $FinalReport = @{
+                    ReportId = [guid]::NewGuid().ToString()
+                    GeneratedAt = (Get-Date).ToString('o')
+                    InstanceId = $InstanceId
+                    Environment = $Environment
+                    Action = $Action
+                    RequestedPackages = $Packages -split ',' | ForEach-Object { $_.Trim() }
+                    Summary = @{
+                        TotalPackages = $ProcessResult.TotalPackages
+                        SuccessCount = $ProcessResult.SuccessCount
+                        FailureCount = $ProcessResult.FailureCount
+                        SkippedCount = $ProcessResult.SkippedCount
+                        VerificationPassed = $VerifyResult.AllInstalled
+                    }
+                    PackageDetails = $ProcessResult.Packages
+                    InstalledInventory = $VerifyResult.InstalledPackages
+                    OutdatedPackages = $VerifyResult.OutdatedPackages
+                }
+
+                # Save final report
+                $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                $FinalReportFile = Join-Path $ReportsPath "chocolatey-report-$InstanceId-$Timestamp.json"
+                $FinalReport | ConvertTo-Json -Depth 10 | Set-Content -Path $FinalReportFile
+
+                # Publish CloudWatch metrics
+                Write-Output ""
+                Write-Output "Publishing CloudWatch metrics..."
+
+                $Namespace = 'HyperionFleet/Chocolatey'
+                $Dimensions = @(
+                    @{ Name = 'InstanceId'; Value = $InstanceId }
+                    @{ Name = 'Environment'; Value = $Environment }
+                )
+
+                $Metrics = @(
+                    @{
+                        MetricName = 'PackagesProcessed'
+                        Value = $ProcessResult.TotalPackages
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                    @{
+                        MetricName = 'PackagesSuccessful'
+                        Value = $ProcessResult.SuccessCount
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                    @{
+                        MetricName = 'PackagesFailed'
+                        Value = $ProcessResult.FailureCount
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                    @{
+                        MetricName = 'TotalInstalledPackages'
+                        Value = $VerifyResult.InstalledPackages.Count
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                    @{
+                        MetricName = 'OutdatedPackages'
+                        Value = $VerifyResult.OutdatedPackages.Count
+                        Unit = 'Count'
+                        Dimensions = $Dimensions
+                    }
+                )
+
+                foreach ($Metric in $Metrics) {
+                    try {
+                        Write-CloudWatchMetricData -Namespace $Namespace -MetricData $Metric -Region $Region
+                        Write-Output "  Published: $($Metric.MetricName) = $($Metric.Value)"
+                    } catch {
+                        Write-Warning "  Failed to publish $($Metric.MetricName): $_"
+                    }
+                }
+
+                Write-Output ""
+                Write-Output "=== Package Management Complete ==="
+                Write-Output "Instance: $InstanceId"
+                Write-Output "Action: $Action"
+                Write-Output "Success: $($ProcessResult.SuccessCount)/$($ProcessResult.TotalPackages)"
+                Write-Output "Report: $FinalReportFile"
+
+            } catch {
+                Write-Error "Reporting failed: $_"
+                throw
+            } finally {
+                Stop-Transcript
+            }
+    outputs:
+      - Name: Output
+        Selector: $.Payload
+        Type: String
