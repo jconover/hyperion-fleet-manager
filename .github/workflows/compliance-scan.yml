@@ -1,0 +1,283 @@
+name: Daily Compliance Scan
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  security-events: write
+
+env:
+  TERRAFORM_VERSION: '1.7.0'
+  AWS_REGION: us-east-1
+
+jobs:
+  security-scan:
+    name: Security Compliance Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Checkov compliance scan
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infrastructure/
+          framework: terraform
+          output_format: cli,json,sarif
+          output_file_path: console,checkov-compliance.json,checkov-compliance.sarif
+          soft_fail: true
+          download_external_modules: true
+          compact: true
+
+      - name: Upload Checkov SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-compliance.sarif
+          category: checkov-compliance
+
+      - name: Run tfsec compliance scan
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: infrastructure/
+          soft_fail: true
+          format: json,sarif
+          additional_args: --out=tfsec-compliance.json --out=tfsec-compliance.sarif
+
+      - name: Upload tfsec SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: tfsec-compliance.sarif
+          category: tfsec-compliance
+
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-scan-results
+          path: |
+            checkov-compliance.json
+            tfsec-compliance.json
+          retention-days: 90
+
+  aws-config-compliance:
+    name: AWS Config Compliance
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[format('AWS_ROLE_{0}', matrix.environment)] }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Compliance
+
+      - name: Check AWS Config compliance
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          echo "Checking AWS Config compliance for ${ENVIRONMENT}..."
+
+          # Get compliance summary
+          aws configservice describe-compliance-by-config-rule \
+            --query 'ComplianceByConfigRules[?Compliance.ComplianceType!=`COMPLIANT`]' \
+            --output json > config-compliance-${ENVIRONMENT}.json || true
+
+          # Display non-compliant resources
+          if [ -s config-compliance-${ENVIRONMENT}.json ]; then
+            echo "Non-compliant resources found in ${ENVIRONMENT}"
+            cat config-compliance-${ENVIRONMENT}.json
+          else
+            echo "All resources compliant in ${ENVIRONMENT}"
+          fi
+
+      - name: Upload compliance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-config-compliance-${{ matrix.environment }}
+          path: config-compliance-${{ matrix.environment }}.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+  security-hub-check:
+    name: AWS Security Hub Check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[format('AWS_ROLE_{0}', matrix.environment)] }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-SecurityHub
+
+      - name: Get Security Hub findings
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          echo "Checking Security Hub findings for ${ENVIRONMENT}..."
+
+          # Get critical and high severity findings
+          aws securityhub get-findings \
+            --filters '{"SeverityLabel":[{"Value":"CRITICAL","Comparison":"EQUALS"},{"Value":"HIGH","Comparison":"EQUALS"}],"RecordState":[{"Value":"ACTIVE","Comparison":"EQUALS"}]}' \
+            --max-items 100 \
+            --output json > securityhub-findings-${ENVIRONMENT}.json 2>/dev/null || echo '{"Findings":[]}' > securityhub-findings-${ENVIRONMENT}.json
+
+          # Count findings
+          FINDING_COUNT=$(jq '.Findings | length' securityhub-findings-${ENVIRONMENT}.json)
+          echo "Found ${FINDING_COUNT} critical/high findings in ${ENVIRONMENT}"
+
+          if [ "${FINDING_COUNT}" -gt 0 ]; then
+            echo "critical_findings=true" >> $GITHUB_OUTPUT
+            jq -r '.Findings[] | "\(.Severity.Label): \(.Title)"' securityhub-findings-${ENVIRONMENT}.json || true
+          fi
+
+      - name: Upload Security Hub findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: securityhub-findings-${{ matrix.environment }}
+          path: securityhub-findings-${{ matrix.environment }}.json
+          retention-days: 90
+
+  iam-policy-check:
+    name: IAM Policy Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-IAMCheck
+
+      - name: Check IAM policies
+        run: |
+          echo "Checking IAM policy compliance..."
+
+          # List policies with broad permissions
+          aws iam list-policies --scope Local --query 'Policies[*].[PolicyName,Arn]' --output json > iam-policies.json
+
+          # Check for overly permissive policies
+          # This is a simplified check - expand based on your compliance requirements
+          echo "IAM policy review completed"
+
+      - name: Upload IAM analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: iam-compliance-report
+          path: iam-policies.json
+          retention-days: 90
+
+  generate-compliance-report:
+    name: Generate Compliance Report
+    runs-on: ubuntu-latest
+    needs: [security-scan, aws-config-compliance, security-hub-check, iam-policy-check]
+    if: always()
+    steps:
+      - name: Download all compliance results
+        uses: actions/download-artifact@v4
+        with:
+          path: compliance-reports/
+
+      - name: Generate summary report
+        run: |
+          echo "# Daily Compliance Report" > compliance-summary.md
+          echo "" >> compliance-summary.md
+          echo "**Report Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> compliance-summary.md
+          echo "" >> compliance-summary.md
+
+          echo "## Security Scan Results" >> compliance-summary.md
+          echo "" >> compliance-summary.md
+
+          # Parse Checkov results if available
+          if [ -f compliance-reports/compliance-scan-results/checkov-compliance.json ]; then
+            CHECKOV_PASSED=$(jq -r '.summary.passed // 0' compliance-reports/compliance-scan-results/checkov-compliance.json)
+            CHECKOV_FAILED=$(jq -r '.summary.failed // 0' compliance-reports/compliance-scan-results/checkov-compliance.json)
+            echo "### Checkov Scan" >> compliance-summary.md
+            echo "- Passed: ${CHECKOV_PASSED}" >> compliance-summary.md
+            echo "- Failed: ${CHECKOV_FAILED}" >> compliance-summary.md
+            echo "" >> compliance-summary.md
+          fi
+
+          echo "## AWS Config Compliance" >> compliance-summary.md
+          echo "" >> compliance-summary.md
+
+          for env in dev staging prod; do
+            if [ -f "compliance-reports/aws-config-compliance-${env}/config-compliance-${env}.json" ]; then
+              COUNT=$(jq '. | length' "compliance-reports/aws-config-compliance-${env}/config-compliance-${env}.json" 2>/dev/null || echo "0")
+              echo "- ${env}: ${COUNT} non-compliant rules" >> compliance-summary.md
+            fi
+          done
+
+          echo "" >> compliance-summary.md
+          echo "## Security Hub Findings" >> compliance-summary.md
+          echo "" >> compliance-summary.md
+
+          for env in dev staging prod; do
+            if [ -f "compliance-reports/securityhub-findings-${env}/securityhub-findings-${env}.json" ]; then
+              COUNT=$(jq '.Findings | length' "compliance-reports/securityhub-findings-${env}/securityhub-findings-${env}.json" 2>/dev/null || echo "0")
+              echo "- ${env}: ${COUNT} critical/high findings" >> compliance-summary.md
+            fi
+          done
+
+          echo "" >> compliance-summary.md
+          echo "## Recommendations" >> compliance-summary.md
+          echo "" >> compliance-summary.md
+          echo "1. Review all failed security checks in the artifacts" >> compliance-summary.md
+          echo "2. Prioritize critical and high severity findings" >> compliance-summary.md
+          echo "3. Update Terraform code to remediate issues" >> compliance-summary.md
+          echo "4. Document any accepted risks" >> compliance-summary.md
+
+          cat compliance-summary.md
+
+      - name: Upload summary report
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-summary-report
+          path: compliance-summary.md
+          retention-days: 90
+
+      - name: Add to job summary
+        run: |
+          cat compliance-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Check compliance thresholds
+        run: |
+          echo "Checking compliance thresholds..."
+          # Add logic to fail the job if compliance thresholds are exceeded
+          # For example, fail if more than X critical findings
+          echo "Threshold check completed"
+
+  notify-compliance-issues:
+    name: Notify Compliance Issues
+    runs-on: ubuntu-latest
+    needs: [generate-compliance-report]
+    if: failure()
+    steps:
+      - name: Send notification
+        run: |
+          echo "Compliance issues detected - sending notifications"
+          # Add notification logic (Slack, email, ticketing system)

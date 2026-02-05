@@ -1,0 +1,320 @@
+name: Terraform Drift Detection
+
+on:
+  schedule:
+    # Run every Monday at 6 AM UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to check (all, dev, staging, prod)'
+        required: false
+        type: choice
+        options:
+          - all
+          - dev
+          - staging
+          - prod
+        default: 'all'
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  TERRAFORM_VERSION: '1.7.0'
+  AWS_REGION: us-east-1
+
+jobs:
+  detect-drift-dev:
+    name: Detect Drift - Dev
+    runs-on: ubuntu-latest
+    if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'dev' || github.event_name == 'schedule'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-DriftDev
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/environments/dev
+          terraform init
+
+      - name: Terraform Plan - Detect Drift
+        id: plan
+        continue-on-error: true
+        run: |
+          cd infrastructure/environments/dev
+          terraform plan -detailed-exitcode -no-color -out=drift-plan.binary > drift-plan.txt 2>&1 || PLAN_EXIT=$?
+          echo "exit_code=${PLAN_EXIT:-0}" >> $GITHUB_OUTPUT
+          cat drift-plan.txt
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report-dev
+          path: infrastructure/environments/dev/drift-plan.txt
+          retention-days: 90
+
+      - name: Analyze drift
+        id: analyze
+        env:
+          PLAN_EXIT_CODE: ${{ steps.plan.outputs.exit_code }}
+        run: |
+          cd infrastructure/environments/dev
+          if [ "${PLAN_EXIT_CODE}" == "2" ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "Drift detected in dev environment"
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            echo "No drift detected in dev environment"
+          fi
+
+    outputs:
+      drift_detected: ${{ steps.analyze.outputs.drift_detected }}
+      exit_code: ${{ steps.plan.outputs.exit_code }}
+
+  detect-drift-staging:
+    name: Detect Drift - Staging
+    runs-on: ubuntu-latest
+    if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'staging' || github.event_name == 'schedule'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-DriftStaging
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/environments/staging
+          terraform init
+
+      - name: Terraform Plan - Detect Drift
+        id: plan
+        continue-on-error: true
+        run: |
+          cd infrastructure/environments/staging
+          terraform plan -detailed-exitcode -no-color -out=drift-plan.binary > drift-plan.txt 2>&1 || PLAN_EXIT=$?
+          echo "exit_code=${PLAN_EXIT:-0}" >> $GITHUB_OUTPUT
+          cat drift-plan.txt
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report-staging
+          path: infrastructure/environments/staging/drift-plan.txt
+          retention-days: 90
+
+      - name: Analyze drift
+        id: analyze
+        env:
+          PLAN_EXIT_CODE: ${{ steps.plan.outputs.exit_code }}
+        run: |
+          cd infrastructure/environments/staging
+          if [ "${PLAN_EXIT_CODE}" == "2" ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "Drift detected in staging environment"
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            echo "No drift detected in staging environment"
+          fi
+
+    outputs:
+      drift_detected: ${{ steps.analyze.outputs.drift_detected }}
+      exit_code: ${{ steps.plan.outputs.exit_code }}
+
+  detect-drift-prod:
+    name: Detect Drift - Production
+    runs-on: ubuntu-latest
+    if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'prod' || github.event_name == 'schedule'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-DriftProd
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/environments/prod
+          terraform init
+
+      - name: Terraform Plan - Detect Drift
+        id: plan
+        continue-on-error: true
+        run: |
+          cd infrastructure/environments/prod
+          terraform plan -detailed-exitcode -no-color -out=drift-plan.binary > drift-plan.txt 2>&1 || PLAN_EXIT=$?
+          echo "exit_code=${PLAN_EXIT:-0}" >> $GITHUB_OUTPUT
+          cat drift-plan.txt
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report-prod
+          path: infrastructure/environments/prod/drift-plan.txt
+          retention-days: 90
+
+      - name: Analyze drift
+        id: analyze
+        env:
+          PLAN_EXIT_CODE: ${{ steps.plan.outputs.exit_code }}
+        run: |
+          cd infrastructure/environments/prod
+          if [ "${PLAN_EXIT_CODE}" == "2" ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "CRITICAL: Drift detected in production environment"
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            echo "No drift detected in production environment"
+          fi
+
+    outputs:
+      drift_detected: ${{ steps.analyze.outputs.drift_detected }}
+      exit_code: ${{ steps.plan.outputs.exit_code }}
+
+  create-drift-report:
+    name: Create Drift Report
+    runs-on: ubuntu-latest
+    needs: [detect-drift-dev, detect-drift-staging, detect-drift-prod]
+    if: always()
+    steps:
+      - name: Download all drift reports
+        uses: actions/download-artifact@v4
+        with:
+          path: drift-reports/
+
+      - name: Generate summary report
+        id: summary
+        env:
+          DEV_DRIFT: ${{ needs.detect-drift-dev.outputs.drift_detected }}
+          STAGING_DRIFT: ${{ needs.detect-drift-staging.outputs.drift_detected }}
+          PROD_DRIFT: ${{ needs.detect-drift-prod.outputs.drift_detected }}
+        run: |
+          echo "# Terraform Drift Detection Report" > drift-summary.md
+          echo "" >> drift-summary.md
+          echo "**Scan Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> drift-summary.md
+          echo "" >> drift-summary.md
+          echo "## Summary" >> drift-summary.md
+          echo "" >> drift-summary.md
+          echo "| Environment | Status | Drift Detected |" >> drift-summary.md
+          echo "|-------------|--------|----------------|" >> drift-summary.md
+
+          echo "| Dev | $([ "${DEV_DRIFT}" == "true" ] && echo "⚠️ Drift" || echo "✅ Clean") | ${DEV_DRIFT} |" >> drift-summary.md
+          echo "| Staging | $([ "${STAGING_DRIFT}" == "true" ] && echo "⚠️ Drift" || echo "✅ Clean") | ${STAGING_DRIFT} |" >> drift-summary.md
+          echo "| Production | $([ "${PROD_DRIFT}" == "true" ] && echo "🚨 Drift" || echo "✅ Clean") | ${PROD_DRIFT} |" >> drift-summary.md
+
+          echo "" >> drift-summary.md
+          echo "## Recommendations" >> drift-summary.md
+          echo "" >> drift-summary.md
+
+          if [ "${DEV_DRIFT}" == "true" ] || [ "${STAGING_DRIFT}" == "true" ] || [ "${PROD_DRIFT}" == "true" ]; then
+            echo "Configuration drift detected in one or more environments." >> drift-summary.md
+            echo "" >> drift-summary.md
+
+            if [ "${PROD_DRIFT}" == "true" ]; then
+              echo "CRITICAL: Production drift requires immediate attention!" >> drift-summary.md
+              echo "has_critical_drift=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_critical_drift=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "No configuration drift detected." >> drift-summary.md
+            echo "has_critical_drift=false" >> $GITHUB_OUTPUT
+          fi
+
+          cat drift-summary.md
+
+      - name: Upload summary report
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-summary-report
+          path: drift-summary.md
+          retention-days: 90
+
+      - name: Create or update drift issue
+        if: steps.summary.outputs.has_critical_drift == 'true'
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('drift-summary.md', 'utf8');
+            const runUrl = process.env.RUN_URL;
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'infrastructure-drift',
+              state: 'open'
+            });
+
+            const issueBody = `${summary}
+
+            ---
+            **Workflow Run:** ${runUrl}
+            **Artifacts:** Download drift reports from the workflow artifacts for detailed analysis.`;
+
+            if (issues.data.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: issueBody
+              });
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: `Drift detected again on ${new Date().toISOString()}`
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Infrastructure Drift Detected',
+                body: issueBody,
+                labels: ['infrastructure-drift', 'priority-high', 'terraform']
+              });
+            }
+
+      - name: Add to job summary
+        run: |
+          cat drift-summary.md >> $GITHUB_STEP_SUMMARY
