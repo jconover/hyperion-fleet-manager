@@ -1,0 +1,2 @@
+# Override for global directory - we want to keep track of state locally since it's bootstrap
+# Remove this if you configure a remote backend for global resources
