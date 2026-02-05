@@ -1,55 +1,79 @@
 # Observability Module
 
-Production-ready Terraform module for comprehensive AWS observability using CloudWatch, SNS, EventBridge, and X-Ray.
+Enterprise-grade Terraform module for comprehensive AWS observability using CloudWatch, SNS, EventBridge, and X-Ray. This root module composes four specialized submodules into a unified observability solution for the Hyperion Fleet Manager.
 
 ## Features
 
-- **CloudWatch Log Groups**: Structured logging for system, application, and security events
-- **CloudWatch Dashboards**: Fleet health overview with real-time metrics visualization
-- **CloudWatch Metric Alarms**: Proactive alerting for CPU, memory, disk, and application health
-- **SNS Notifications**: Email alerts for critical events
-- **EventBridge Rules**: Automation triggers for instance state changes, health checks, and backups
-- **X-Ray Tracing**: Optional distributed tracing for request analysis (optional)
-- **Composite Alarms**: Advanced alarm logic for complex failure scenarios
+- **CloudWatch Dashboards**: Fleet health, security, and cost monitoring visualization
+- **CloudWatch Alarms**: Tiered severity alerts (critical, warning, info) with composite alarms
+- **Centralized Logging**: Structured log groups with metric filters and Insights queries
+- **SNS Alerting**: Multi-channel notifications (email, SMS, webhooks, Slack, PagerDuty)
+- **EventBridge Rules**: Automated event routing and cross-account support
+- **Lambda Processor**: Alert enrichment, PII redaction, and intelligent routing
+- **Cost Monitoring**: Budget tracking, anomaly detection, and service-level analysis
+- **Security Monitoring**: GuardDuty, Security Hub, CloudTrail, and VPC Flow Logs integration
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     CloudWatch Observability                     │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Log Groups                  Metrics & Alarms                   │
-│  ┌──────────────────┐       ┌──────────────────┐              │
-│  │ /hyperion/fleet/ │       │ CPU > 80%        │              │
-│  │   - system       │       │ Memory > 85%     │              │
-│  │   - application  │◄─────►│ Disk < 15%       │              │
-│  │   - security     │       │ UnhealthyHosts   │              │
-│  └──────────────────┘       │ Error Rate       │              │
-│           │                  └──────────────────┘              │
-│           │                           │                         │
-│           ▼                           ▼                         │
-│  ┌──────────────────┐       ┌──────────────────┐              │
-│  │ Metric Filters   │       │  SNS Topic       │              │
-│  │ - Error Count    │       │  - Email Alerts  │              │
-│  │ - Security Events│       └──────────────────┘              │
-│  └──────────────────┘                                          │
-│                                                                  │
-│  EventBridge Rules           Dashboard                          │
-│  ┌──────────────────┐       ┌──────────────────┐              │
-│  │ Instance States  │       │ Fleet Health     │              │
-│  │ Health Checks    │       │ - CPU/Memory     │              │
-│  │ Backup Triggers  │       │ - Network/Disk   │              │
-│  └──────────────────┘       │ - Response Times │              │
-│                              └──────────────────┘              │
-│                                                                  │
-│  X-Ray (Optional)                                               │
-│  ┌──────────────────┐                                          │
-│  │ Trace Groups     │                                          │
-│  │ Sampling Rules   │                                          │
-│  │ Insights         │                                          │
-│  └──────────────────┘                                          │
-└─────────────────────────────────────────────────────────────────┘
+                                 Observability Module
+    +-------------------------------------------------------------------------+
+    |                                                                         |
+    |  +-------------------+     +-------------------+     +----------------+ |
+    |  |    Dashboards     |     |      Alarms       |     |    Logging     | |
+    |  |   Submodule       |     |    Submodule      |     |   Submodule    | |
+    |  +-------------------+     +-------------------+     +----------------+ |
+    |  | - Fleet Health    |     | - CPU/Memory/Disk |     | - Application  | |
+    |  | - Security        |     | - Network/EBS     |     | - System       | |
+    |  | - Cost            |     | - ASG/Target Grp  |     | - Security     | |
+    |  |                   |     | - Composite       |     | - PowerShell   | |
+    |  +--------+----------+     +--------+----------+     | - SSM/DSC      | |
+    |           |                         |                +-------+--------+ |
+    |           |                         |                        |          |
+    |           v                         v                        v          |
+    |  +----------------------------------------------------------------------+
+    |  |                        Alerting Submodule                            |
+    |  +----------------------------------------------------------------------+
+    |  | SNS Topics (critical, warning, info, security, cost)                 |
+    |  | Lambda Processor (enrichment, routing, PII redaction)                |
+    |  | EventBridge Rules (GuardDuty, Config, EC2, AutoScaling, Cost)        |
+    |  | SQS Queues (dead letter, aggregate)                                  |
+    |  | Subscriptions (email, SMS, HTTPS/webhooks)                           |
+    |  +----------------------------------------------------------------------+
+    |                                                                         |
+    +-------------------------------------------------------------------------+
+                |                    |                    |
+                v                    v                    v
+         +------------+      +-------------+      +---------------+
+         |   Email    |      |    Slack    |      |   PagerDuty   |
+         | Recipients |      |   Channels  |      |   Escalation  |
+         +------------+      +-------------+      +---------------+
+```
+
+## Submodule Relationships
+
+```
+                    +------------------+
+                    |   Root Module    |
+                    |   (main.tf)      |
+                    +--------+---------+
+                             |
+         +-------------------+-------------------+
+         |                   |                   |
+         v                   v                   v
++----------------+  +----------------+  +----------------+
+|   Alerting     |  |    Logging     |  |    Alarms      |
+|   (./alerting) |  |   (./logging)  |  |   (./alarms)   |
++-------+--------+  +----------------+  +--------+-------+
+        |                                        |
+        |  SNS Topic ARNs                        |
+        +----------------------------------------+
+                             |
+                             v
+                    +----------------+
+                    |   Dashboards   |
+                    | (./dashboards) |
+                    +----------------+
 ```
 
 ## Usage
@@ -60,495 +84,394 @@ Production-ready Terraform module for comprehensive AWS observability using Clou
 module "observability" {
   source = "./modules/observability"
 
-  environment = "production"
+  environment  = "production"
+  project_name = "hyperion"
 
-  alert_email_addresses = [
-    "ops-team@example.com",
-    "platform-team@example.com"
-  ]
+  # Auto Scaling Groups to monitor
+  auto_scaling_group_names = ["hyperion-web-asg", "hyperion-api-asg"]
 
-  instance_ids = [
-    "i-1234567890abcdef0",
-    "i-0987654321fedcba0"
-  ]
-
-  target_group_arn_suffix  = "targetgroup/fleet-tg/1234567890abcdef"
-  load_balancer_arn_suffix = "app/fleet-alb/1234567890abcdef"
+  # Email notifications by severity
+  notification_emails = {
+    critical = ["oncall@example.com", "sre@example.com"]
+    warning  = ["ops@example.com"]
+    info     = ["monitoring@example.com"]
+    security = ["security@example.com"]
+    cost     = ["finops@example.com"]
+  }
 
   tags = {
-    Project     = "fleet-manager"
+    Project     = "hyperion-fleet-manager"
     ManagedBy   = "terraform"
     CostCenter  = "engineering"
   }
 }
 ```
 
-### Advanced Configuration with Custom Thresholds
+### Full Configuration
 
 ```hcl
 module "observability" {
   source = "./modules/observability"
 
-  environment = "production"
+  # Required
+  environment  = "production"
+  project_name = "hyperion"
+  aws_region   = "us-east-1"
 
-  # SNS Configuration
-  alert_email_addresses = [
-    "ops-team@example.com",
-    "platform-team@example.com"
-  ]
+  # Feature Flags
+  enable_dashboards = true
+  enable_alarms     = true
+  enable_alerting   = true
+  enable_logging    = true
 
   # Instance Monitoring
-  instance_ids           = var.instance_ids
-  enable_instance_alarms = true
+  instance_ids = [
+    "i-1234567890abcdef0",
+    "i-0987654321fedcba0"
+  ]
+  auto_scaling_group_names = ["hyperion-web-asg", "hyperion-api-asg"]
+  ebs_volume_ids = ["vol-1234567890abcdef0"]
 
-  # Custom Alarm Thresholds
-  cpu_threshold_percent    = 75
-  cpu_evaluation_periods   = 4  # 20 minutes at 5-min periods
+  # Notification Configuration
+  notification_emails = {
+    critical = ["oncall@example.com"]
+    warning  = ["ops@example.com"]
+    info     = ["info@example.com"]
+    security = ["security@example.com"]
+    cost     = ["finops@example.com"]
+  }
+  notification_sms      = ["+14155552671"]
+  enable_security_sms   = true
 
-  memory_threshold_percent = 80
-  memory_evaluation_periods = 3  # 15 minutes
+  # Webhook Integrations
+  webhook_endpoints = {
+    critical = {
+      pagerduty = "https://events.pagerduty.com/integration/xxx/enqueue"
+    }
+    info = {
+      slack = "https://hooks.slack.com/services/xxx"
+    }
+  }
 
-  disk_free_threshold_percent = 20
-  disk_evaluation_periods     = 2  # 10 minutes
+  # Direct Integrations
+  slack_webhook_url         = "https://hooks.slack.com/services/xxx"
+  pagerduty_integration_key = "xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-  unhealthy_host_threshold           = 1
-  unhealthy_host_evaluation_periods  = 3
+  # Alarm Thresholds
+  alarm_thresholds = {
+    cpu_percent              = 80
+    memory_percent           = 85
+    disk_free_percent        = 15
+    network_bytes_per_second = 100000000
+  }
 
-  error_rate_threshold     = 5
-  error_evaluation_periods = 3
+  # Logging Configuration
+  log_retention_days = {
+    application = 30
+    system      = 60
+    security    = 90
+    powershell  = 90
+    ssm         = 30
+    dsc         = 30
+  }
+  enable_data_protection = true
+  enable_s3_archival     = true
+  archive_bucket_name    = "hyperion-logs-archive"
 
-  # Target Group Monitoring
-  target_group_arn_suffix    = var.target_group_arn_suffix
-  load_balancer_arn_suffix   = var.load_balancer_arn_suffix
-  enable_target_group_alarms = true
+  # Security Dashboard
+  security_guardduty_detector_id     = "1234567890abcdef1234567890abcdef"
+  security_hub_enabled               = true
+  security_vpc_flow_log_group_name   = "/aws/vpc/flow-logs"
+  security_cloudtrail_log_group_name = "/aws/cloudtrail/logs"
 
-  # Log Configuration
-  log_retention_days          = 90
-  security_log_retention_days = 365
-  kms_key_id                  = aws_kms_key.logs.id
+  # Cost Dashboard
+  cost_budget_amount               = 5000
+  cost_enable_cost_anomaly_detection = true
+  cost_services_to_track = [
+    "AmazonEC2",
+    "AmazonEBS",
+    "AmazonS3",
+    "AWSDataTransfer"
+  ]
 
-  # CloudWatch Configuration
-  cloudwatch_namespace = "FleetManager"
-  alarm_period         = 300  # 5 minutes
-
-  # EventBridge Configuration
-  health_check_schedule       = "rate(5 minutes)"
-  enable_scheduled_health_checks = true
-
-  backup_schedule           = "cron(0 2 * * ? *)"  # 2 AM daily
-  enable_scheduled_backups  = true
-
-  # X-Ray Configuration
-  enable_xray                   = true
-  xray_sampling_priority        = 100
-  xray_reservoir_size           = 5
-  xray_fixed_rate               = 0.10  # 10% sampling
-  xray_service_name             = "fleet-manager"
-  xray_response_time_threshold  = 2
-  xray_insights_enabled         = true
-  xray_notifications_enabled    = true
+  # KMS Encryption
+  kms_key_arn = "arn:aws:kms:us-east-1:123456789012:key/xxx"
 
   tags = {
-    Project     = "fleet-manager"
+    Project     = "hyperion-fleet-manager"
     Environment = "production"
     ManagedBy   = "terraform"
   }
 }
 ```
 
-### Multi-Environment Setup
+### Selective Submodule Deployment
 
 ```hcl
-# Production
-module "observability_prod" {
+# Deploy only logging and alerting
+module "observability_minimal" {
   source = "./modules/observability"
 
-  environment               = "production"
-  alert_email_addresses     = ["ops-prod@example.com"]
-  log_retention_days        = 90
-  cpu_threshold_percent     = 80
-  memory_threshold_percent  = 85
-  enable_xray               = true
+  environment  = "dev"
+  project_name = "hyperion"
 
-  instance_ids              = module.compute_prod.instance_ids
-  target_group_arn_suffix   = module.networking_prod.target_group_arn_suffix
-  load_balancer_arn_suffix  = module.networking_prod.alb_arn_suffix
+  enable_dashboards = false
+  enable_alarms     = false
+  enable_alerting   = true
+  enable_logging    = true
 
-  tags = local.common_tags_prod
-}
-
-# Staging
-module "observability_staging" {
-  source = "./modules/observability"
-
-  environment               = "staging"
-  alert_email_addresses     = ["ops-staging@example.com"]
-  log_retention_days        = 30
-  cpu_threshold_percent     = 85
-  memory_threshold_percent  = 90
-  enable_xray               = false
-
-  instance_ids              = module.compute_staging.instance_ids
-  target_group_arn_suffix   = module.networking_staging.target_group_arn_suffix
-  load_balancer_arn_suffix  = module.networking_staging.alb_arn_suffix
-
-  tags = local.common_tags_staging
-}
-```
-
-## Alarm Configurations
-
-### CPU Alarm
-- **Metric**: `CPUUtilization`
-- **Default Threshold**: 80%
-- **Default Evaluation**: 3 periods of 5 minutes (15 minutes)
-- **Action**: SNS notification
-
-### Memory Alarm
-- **Metric**: `mem_used_percent` (custom metric)
-- **Default Threshold**: 85%
-- **Default Evaluation**: 3 periods of 5 minutes (15 minutes)
-- **Action**: SNS notification
-- **Note**: Requires CloudWatch agent on EC2 instances
-
-### Disk Space Alarm
-- **Metric**: `disk_free_percent` (custom metric)
-- **Default Threshold**: < 15% free
-- **Default Evaluation**: 2 periods of 5 minutes (10 minutes)
-- **Action**: SNS notification
-- **Note**: Requires CloudWatch agent on EC2 instances
-
-### Unhealthy Host Alarm
-- **Metric**: `UnHealthyHostCount`
-- **Default Threshold**: > 0
-- **Default Evaluation**: 2 periods of 5 minutes (10 minutes)
-- **Action**: SNS notification
-
-### Application Error Rate Alarm
-- **Metric**: `ErrorCount` (from log metric filter)
-- **Default Threshold**: > 10 errors per minute
-- **Default Evaluation**: 2 periods of 1 minute
-- **Action**: SNS notification
-
-### Security Event Alarm
-- **Metric**: `SecurityEvents` (from log metric filter)
-- **Default Threshold**: > 0 critical events
-- **Default Evaluation**: 1 period of 1 minute
-- **Action**: SNS notification
-
-## CloudWatch Agent Configuration
-
-To enable memory and disk metrics, install and configure the CloudWatch agent on EC2 instances:
-
-```json
-{
-  "metrics": {
-    "namespace": "FleetManager",
-    "metrics_collected": {
-      "mem": {
-        "measurement": [
-          {
-            "name": "mem_used_percent",
-            "rename": "mem_used_percent",
-            "unit": "Percent"
-          }
-        ],
-        "metrics_collection_interval": 60
-      },
-      "disk": {
-        "measurement": [
-          {
-            "name": "disk_free",
-            "rename": "disk_free_percent",
-            "unit": "Percent"
-          }
-        ],
-        "metrics_collection_interval": 60,
-        "resources": [
-          "/"
-        ]
-      }
-    }
+  notification_emails = {
+    critical = ["dev-alerts@example.com"]
   }
 }
 ```
 
-Install the agent:
+### Multi-Environment Pattern
 
-```bash
-# Amazon Linux 2
-sudo yum install amazon-cloudwatch-agent -y
+```hcl
+locals {
+  environments = {
+    dev = {
+      alarm_thresholds = { cpu_percent = 90, memory_percent = 90 }
+      retention_days   = { application = 7, system = 14, security = 30, powershell = 30, ssm = 7, dsc = 7 }
+    }
+    staging = {
+      alarm_thresholds = { cpu_percent = 85, memory_percent = 85 }
+      retention_days   = { application = 14, system = 30, security = 60, powershell = 60, ssm = 14, dsc = 14 }
+    }
+    production = {
+      alarm_thresholds = { cpu_percent = 80, memory_percent = 85 }
+      retention_days   = { application = 30, system = 60, security = 365, powershell = 90, ssm = 30, dsc = 30 }
+    }
+  }
+}
 
-# Ubuntu
-sudo apt-get install amazon-cloudwatch-agent -y
+module "observability" {
+  for_each = local.environments
+  source   = "./modules/observability"
 
-# Start the agent
-sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-  -a fetch-config \
-  -m ec2 \
-  -s \
-  -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+  environment      = each.key
+  project_name     = "hyperion"
+  alarm_thresholds = each.value.alarm_thresholds
+  log_retention_days = each.value.retention_days
+
+  auto_scaling_group_names = ["hyperion-${each.key}-web-asg"]
+
+  notification_emails = {
+    critical = ["oncall-${each.key}@example.com"]
+  }
+}
 ```
 
-## EventBridge Automation
+## Input Variables
 
-### Instance State Changes
-Captures EC2 instance state changes (stopped, terminated, stopping) and sends SNS notifications.
+### Required Variables
 
-### Scheduled Health Checks
-Triggers automated health checks at regular intervals (default: every 5 minutes).
+| Name | Description | Type |
+|------|-------------|------|
+| `environment` | Environment name (dev, staging, production, prod, uat, qa) | `string` |
 
-### Backup Triggers
-Triggers automated backups on a schedule (default: 2 AM daily).
+### Common Variables
 
-## X-Ray Tracing
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `project_name` | Project name for resource naming | `string` | `"hyperion"` |
+| `aws_region` | AWS region (uses provider region if empty) | `string` | `""` |
+| `tags` | Common tags to apply to all resources | `map(string)` | `{}` |
 
-When enabled, X-Ray provides distributed tracing capabilities:
+### Feature Flags
 
-1. **Sampling Rule**: Controls trace collection rate
-2. **Trace Groups**: Organizes traces by service
-3. **Insights**: Automatic anomaly detection
-4. **Notifications**: Alerts for detected issues
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `enable_dashboards` | Enable CloudWatch dashboards | `bool` | `true` |
+| `enable_alarms` | Enable CloudWatch metric alarms | `bool` | `true` |
+| `enable_alerting` | Enable SNS alerting infrastructure | `bool` | `true` |
+| `enable_logging` | Enable centralized logging | `bool` | `true` |
 
-To use X-Ray, instrument your application:
+### Instance Configuration
 
-```python
-# Python Example
-from aws_xray_sdk.core import xray_recorder
-from aws_xray_sdk.core import patch_all
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `instance_ids` | List of EC2 instance IDs to monitor | `list(string)` | `[]` |
+| `auto_scaling_group_names` | List of ASG names to monitor | `list(string)` | `[]` |
+| `ebs_volume_ids` | List of EBS volume IDs to monitor | `list(string)` | `[]` |
 
-patch_all()
+### Notification Configuration
 
-@xray_recorder.capture('process_request')
-def process_request(event):
-    # Your code here
-    pass
-```
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `notification_emails` | Map of emails by severity (critical, warning, info, security, cost) | `map(list(string))` | `{}` |
+| `notification_sms` | List of phone numbers (E.164 format) | `list(string)` | `[]` |
+| `webhook_endpoints` | Map of webhook URLs by severity | `map(map(string))` | `{}` |
+| `slack_webhook_url` | Slack webhook URL | `string` | `null` |
+| `pagerduty_integration_key` | PagerDuty integration key | `string` | `null` |
 
-## Dashboard
+### Alarm Configuration
 
-The module creates a comprehensive CloudWatch dashboard with:
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `alarm_thresholds` | Map of alarm thresholds | `map(number)` | `{}` |
+| `enable_memory_alarms` | Enable memory alarms | `bool` | `true` |
+| `enable_disk_alarms` | Enable disk alarms | `bool` | `true` |
+| `enable_network_alarms` | Enable network alarms | `bool` | `true` |
+| `enable_composite_alarms` | Enable composite alarms | `bool` | `true` |
 
-- **CPU Utilization**: Average and maximum CPU across instances
-- **Memory Utilization**: Memory usage trends with thresholds
-- **Disk Space**: Free disk space monitoring
-- **Target Group Health**: Healthy vs unhealthy host counts
-- **HTTP Response Codes**: 2xx, 4xx, 5xx breakdown
-- **Response Time**: Average and p99 latency
-- **Application Errors**: Error rate from logs
-- **Recent Errors**: Table of recent application errors
-- **Security Events**: Critical security event log
-- **Network Traffic**: Network in/out metrics
-- **Disk I/O**: Read/write operations
-- **Load Balancer Connections**: Active and new connections
-- **Active Alarms**: Current alarm states
+### Logging Configuration
+
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `log_retention_days` | Retention periods by log type | `object` | See defaults |
+| `log_group_class` | Log group class (STANDARD or INFREQUENT_ACCESS) | `string` | `"STANDARD"` |
+| `enable_data_protection` | Enable PII/sensitive data masking | `bool` | `false` |
+| `enable_s3_archival` | Enable log archival to S3 | `bool` | `false` |
+| `archive_bucket_name` | S3 bucket for log archival | `string` | `""` |
+
+### Security Dashboard
+
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `enable_security_dashboard` | Enable security dashboard | `bool` | `true` |
+| `security_guardduty_detector_id` | GuardDuty detector ID | `string` | `""` |
+| `security_hub_enabled` | Whether Security Hub is enabled | `bool` | `false` |
+| `security_vpc_flow_log_group_name` | VPC Flow Log group name | `string` | `""` |
+
+### Cost Dashboard
+
+| Name | Description | Type | Default |
+|------|-------------|------|---------|
+| `cost_budget_amount` | Monthly budget in USD | `number` | `1000` |
+| `cost_enable_cost_anomaly_detection` | Enable cost anomaly detection | `bool` | `true` |
+| `cost_services_to_track` | AWS services to track | `list(string)` | See defaults |
 
 ## Outputs
 
-```hcl
-# Log Groups
-output "log_group_names" {
-  value = module.observability.log_group_names
-}
+### Dashboard Outputs
 
-# SNS Topic
-output "sns_topic_arn" {
-  value = module.observability.sns_topic_arn
-}
+| Name | Description |
+|------|-------------|
+| `dashboard_arns` | Map of all dashboard ARNs |
+| `dashboard_urls` | Map of direct URLs to dashboards |
+| `fleet_health_dashboard_url` | URL to Fleet Health dashboard |
+| `security_dashboard_url` | URL to Security dashboard |
+| `cost_dashboard_url` | URL to Cost dashboard |
 
-# Dashboard
-output "dashboard_url" {
-  value = module.observability.dashboard_url
-}
+### Alarm Outputs
 
-# Alarms
-output "alarm_names" {
-  value = module.observability.alarm_names
-}
+| Name | Description |
+|------|-------------|
+| `alarm_arns` | Map of alarm ARNs by type |
+| `alarm_count` | Count of alarms by severity |
+| `critical_alarm_arns` | List of critical alarm ARNs |
+| `composite_alarm_arns` | Map of composite alarm ARNs |
 
-# X-Ray
-output "xray_group_name" {
-  value = module.observability.xray_group_name
-}
-```
+### SNS Topic Outputs
+
+| Name | Description |
+|------|-------------|
+| `sns_topic_arns` | Map of SNS topic ARNs by severity |
+| `critical_topic_arn` | ARN of critical alerts topic |
+| `security_topic_arn` | ARN of security alerts topic |
+
+### Log Group Outputs
+
+| Name | Description |
+|------|-------------|
+| `log_group_arns` | Map of log group ARNs by type |
+| `log_group_names` | Map of log group names by type |
+| `cloudwatch_namespace` | CloudWatch namespace for metrics |
+
+### Summary Output
+
+| Name | Description |
+|------|-------------|
+| `observability_summary` | Consolidated summary of all resources |
+
+## Submodule Documentation
+
+- [Dashboards Submodule](./dashboards/README.md) - CloudWatch dashboard creation
+- [Alarms Submodule](./alarms/README.md) - Metric alarm configuration
+- [Logging Submodule](./logging/README.md) - Log group and metric filter management
+- [Alerting Submodule](./alerting/README.md) - SNS topics, EventBridge, and Lambda processor
 
 ## Requirements
 
 | Name | Version |
 |------|---------|
-| terraform | >= 1.0 |
+| terraform | >= 1.5 |
 | aws | >= 5.0 |
-
-## Providers
-
-| Name | Version |
-|------|---------|
-| aws | >= 5.0 |
-
-## Resources Created
-
-- 3 CloudWatch Log Groups
-- 2 CloudWatch Log Metric Filters
-- 1 SNS Topic with email subscriptions
-- 1 CloudWatch Dashboard
-- Multiple CloudWatch Metric Alarms (per instance + shared)
-- 1 Composite Alarm
-- 3 EventBridge Rules
-- 3 EventBridge Targets
-- 1 X-Ray Sampling Rule (optional)
-- 1 X-Ray Group (optional)
 
 ## Cost Considerations
 
-### CloudWatch Logs
-- **Ingestion**: $0.50 per GB
-- **Storage**: $0.03 per GB/month
-- **Insights Queries**: $0.005 per GB scanned
-
-### CloudWatch Metrics
-- **Custom Metrics**: $0.30 per metric/month
+### CloudWatch Costs (Estimated)
+- **Dashboards**: $3.00 per dashboard/month
 - **Alarms**: $0.10 per alarm/month
-- **Dashboard**: $3.00 per dashboard/month
+- **Logs Ingestion**: $0.50 per GB
+- **Logs Storage**: $0.03 per GB/month
+- **Metrics**: $0.30 per custom metric/month
 
-### SNS
-- **Email Notifications**: $2.00 per 100,000 notifications
+### SNS Costs
+- **Email**: First 1,000 free, then $2.00 per 100,000
+- **SMS**: Varies by destination country
+- **HTTPS**: $0.60 per 1 million requests
 
-### X-Ray
-- **Traces Recorded**: $5.00 per 1 million traces
-- **Traces Retrieved**: $0.50 per 1 million traces
-- **Traces Scanned**: $0.50 per 1 million traces
-
-### Example Monthly Cost (Medium Deployment)
-- 3 EC2 instances with custom metrics: ~$5
-- 10 CloudWatch alarms: ~$1
-- 1 dashboard: $3
-- 10 GB log ingestion: $5
-- 5 GB log storage: $0.15
-- SNS notifications (1000/month): ~$0.02
-- X-Ray (100K traces): ~$0.50
-
-**Total**: ~$15/month
+### Estimated Monthly Cost
+| Component | Small (3 instances) | Medium (10 instances) | Large (50 instances) |
+|-----------|---------------------|----------------------|----------------------|
+| Dashboards | $9 | $9 | $9 |
+| Alarms | $5 | $15 | $60 |
+| Log Ingestion | $5 | $15 | $75 |
+| Log Storage | $1 | $5 | $25 |
+| SNS | $1 | $3 | $10 |
+| **Total** | **~$21** | **~$47** | **~$179** |
 
 ## Security Best Practices
 
-1. **Encrypt Logs**: Use KMS encryption for sensitive log data
-2. **Restrict SNS Access**: Use IAM policies to control topic access
-3. **Separate Security Logs**: Keep security logs isolated with longer retention
-4. **Monitor Metric Filters**: Set up alerts for security-related log patterns
-5. **Use IAM Roles**: Grant CloudWatch agent permissions via IAM roles
-6. **Enable MFA**: Require MFA for SNS subscription confirmations
-7. **Audit Access**: Monitor CloudWatch API calls via CloudTrail
-
-## Operational Runbook
-
-### Responding to Alarms
-
-#### High CPU Alert
-1. Check dashboard for CPU trends
-2. Review application logs for errors
-3. Identify resource-intensive processes
-4. Consider scaling horizontally or vertically
-
-#### High Memory Alert
-1. Review memory usage trends
-2. Check for memory leaks in application logs
-3. Analyze heap dumps if available
-4. Consider increasing instance size
-
-#### Low Disk Space Alert
-1. Identify large files/directories
-2. Clean up temporary files and logs
-3. Implement log rotation
-4. Consider increasing EBS volume size
-
-#### Unhealthy Host Alert
-1. Check instance status in EC2 console
-2. Review instance logs for errors
-3. Verify security group and network ACL rules
-4. Test application health endpoint manually
-
-#### Application Error Alert
-1. Query CloudWatch Logs Insights for error details
-2. Identify error patterns and frequency
-3. Check recent deployments for correlation
-4. Review application monitoring for root cause
-
-## Maintenance
-
-### Log Retention Management
-Adjust retention periods based on compliance requirements and cost optimization.
-
-### Alarm Threshold Tuning
-Monitor alarm frequency and adjust thresholds to reduce false positives.
-
-### Dashboard Updates
-Keep dashboard widgets updated as infrastructure evolves.
-
-### Regular Reviews
-- Weekly: Review alarm patterns and adjust thresholds
-- Monthly: Analyze log costs and optimize retention
-- Quarterly: Review dashboard effectiveness and update widgets
+1. **Enable KMS Encryption**: Encrypt logs and SNS topics with customer-managed keys
+2. **Use Data Protection**: Enable PII/sensitive data masking for logs
+3. **Least Privilege**: Use IAM roles with minimal required permissions
+4. **Separate Security Logs**: Longer retention for security/audit logs
+5. **Enable MFA**: Require MFA for SNS subscription confirmations
+6. **Audit Access**: Monitor CloudWatch and SNS API calls via CloudTrail
 
 ## Troubleshooting
 
 ### Alarms Not Triggering
-- Verify CloudWatch agent is running on instances
-- Check IAM permissions for CloudWatch agent
-- Confirm metric namespace matches configuration
-- Review alarm threshold and evaluation period settings
+1. Verify CloudWatch agent is running on instances
+2. Check metric namespace matches configuration
+3. Review IAM permissions for metric publishing
 
-### No Data in Dashboard
-- Ensure CloudWatch agent is configured correctly
-- Verify metric namespace and dimensions
-- Check IAM permissions for metric publishing
-- Review agent logs: `/opt/aws/amazon-cloudwatch-agent/logs/`
+### No Dashboard Data
+1. Ensure CloudWatch agent is configured
+2. Verify metric dimensions match
+3. Check agent logs: `/opt/aws/amazon-cloudwatch-agent/logs/`
 
 ### SNS Emails Not Received
-- Confirm email subscriptions in SNS console
-- Check spam/junk folders
-- Verify SNS topic policy allows CloudWatch to publish
-- Test SNS topic with manual publish
-
-### X-Ray Traces Not Appearing
-- Confirm X-Ray daemon is running
-- Check application instrumentation
-- Verify IAM permissions for X-Ray
-- Review sampling rule configuration
-
-## Examples
-
-See the `examples/` directory for complete implementation examples:
-- `examples/basic/` - Minimal configuration
-- `examples/complete/` - Full-featured setup
-- `examples/multi-environment/` - Dev/staging/prod patterns
-
-## Contributing
-
-When contributing to this module:
-1. Follow Terraform best practices
-2. Update documentation for new features
-3. Add examples for complex configurations
-4. Test across multiple AWS regions
-5. Validate with `terraform validate` and `tflint`
-
-## License
-
-This module is provided as-is for use in infrastructure projects.
-
-## Support
-
-For issues and questions:
-1. Check the troubleshooting section
-2. Review AWS CloudWatch documentation
-3. Open an issue in the repository
-4. Contact the platform team
+1. Confirm subscriptions in SNS console
+2. Check spam/junk folders
+3. Verify topic policy allows publishing
 
 ## Changelog
 
+### v2.0.0
+- Refactored into composable submodules
+- Added security and cost dashboards
+- Implemented tiered severity alerting
+- Added Lambda processor for alert enrichment
+- Cross-account support for logs and events
+
 ### v1.0.0
 - Initial release
-- CloudWatch Logs, Metrics, and Dashboards
+- Basic CloudWatch Logs and Metrics
 - SNS alerting
 - EventBridge automation
-- X-Ray tracing support
-- Comprehensive documentation
+
+## Contributing
+
+1. Follow Terraform best practices
+2. Update documentation for new features
+3. Test across multiple environments
+4. Validate with `terraform validate` and `tflint`
+
+## License
+
+This module is provided as part of the Hyperion Fleet Manager project.

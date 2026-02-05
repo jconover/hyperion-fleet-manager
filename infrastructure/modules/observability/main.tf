@@ -1,5 +1,24 @@
+# -----------------------------------------------------------------------------
+# Hyperion Fleet Manager - Observability Module Root
+# -----------------------------------------------------------------------------
+# This is the root module that composes all observability submodules into a
+# unified, enterprise-grade observability solution.
+#
+# Submodules included:
+#   - dashboards: CloudWatch dashboards for fleet health, security, and cost
+#   - alarms: CloudWatch metric alarms with tiered severity
+#   - logging: Centralized CloudWatch log management
+#   - alerting: SNS topics, subscriptions, and EventBridge rules
+#
+# Architecture:
+#   The alerting module creates SNS topics that are passed to the alarms module.
+#   The logging module creates log groups that can be referenced by dashboards.
+#   All modules share common variables for environment, project, and tags.
+# -----------------------------------------------------------------------------
+
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.5"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -8,478 +27,309 @@ terraform {
   }
 }
 
-# CloudWatch Log Groups
-resource "aws_cloudwatch_log_group" "system" {
-  name              = "/hyperion/fleet/system"
-  retention_in_days = var.log_retention_days
-  kms_key_id        = var.kms_key_id
+# -----------------------------------------------------------------------------
+# Data Sources
+# -----------------------------------------------------------------------------
 
-  tags = merge(
-    var.tags,
-    {
-      Name        = "hyperion-fleet-system-logs"
-      LogType     = "system"
-      Environment = var.environment
-    }
-  )
-}
-
-resource "aws_cloudwatch_log_group" "application" {
-  name              = "/hyperion/fleet/application"
-  retention_in_days = var.log_retention_days
-  kms_key_id        = var.kms_key_id
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "hyperion-fleet-application-logs"
-      LogType     = "application"
-      Environment = var.environment
-    }
-  )
-}
-
-resource "aws_cloudwatch_log_group" "security" {
-  name              = "/hyperion/fleet/security"
-  retention_in_days = var.security_log_retention_days
-  kms_key_id        = var.kms_key_id
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "hyperion-fleet-security-logs"
-      LogType     = "security"
-      Environment = var.environment
-    }
-  )
-}
-
-# CloudWatch Log Metric Filters
-resource "aws_cloudwatch_log_metric_filter" "error_count" {
-  name           = "${var.environment}-error-count"
-  log_group_name = aws_cloudwatch_log_group.application.name
-  pattern        = "[time, request_id, level = ERROR*, ...]"
-
-  metric_transformation {
-    name      = "ErrorCount"
-    namespace = var.cloudwatch_namespace
-    value     = "1"
-    unit      = "Count"
-  }
-}
-
-resource "aws_cloudwatch_log_metric_filter" "security_events" {
-  name           = "${var.environment}-security-events"
-  log_group_name = aws_cloudwatch_log_group.security.name
-  pattern        = "[time, event_type, severity = CRITICAL*, ...]"
-
-  metric_transformation {
-    name      = "SecurityEvents"
-    namespace = var.cloudwatch_namespace
-    value     = "1"
-    unit      = "Count"
-  }
-}
-
-# SNS Topic for Alerts
-resource "aws_sns_topic" "alerts" {
-  name              = "${var.environment}-fleet-alerts"
-  display_name      = "Fleet Monitoring Alerts"
-  kms_master_key_id = var.kms_key_id
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-fleet-alerts"
-      Environment = var.environment
-    }
-  )
-}
-
-resource "aws_sns_topic_policy" "alerts" {
-  arn = aws_sns_topic.alerts.arn
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "AllowCloudWatchToPublish"
-        Effect = "Allow"
-        Principal = {
-          Service = "cloudwatch.amazonaws.com"
-        }
-        Action   = "SNS:Publish"
-        Resource = aws_sns_topic.alerts.arn
-      },
-      {
-        Sid    = "AllowEventsToPublish"
-        Effect = "Allow"
-        Principal = {
-          Service = "events.amazonaws.com"
-        }
-        Action   = "SNS:Publish"
-        Resource = aws_sns_topic.alerts.arn
-      }
-    ]
-  })
-}
-
-resource "aws_sns_topic_subscription" "email_alerts" {
-  for_each = toset(var.alert_email_addresses)
-
-  topic_arn = aws_sns_topic.alerts.arn
-  protocol  = "email"
-  endpoint  = each.value
-}
-
-# CloudWatch Dashboard
-resource "aws_cloudwatch_dashboard" "fleet_health" {
-  dashboard_name = "${var.environment}-fleet-health-overview"
-  dashboard_body = templatefile("${path.module}/dashboards/fleet-health.json", {
-    region              = data.aws_region.current.name
-    environment         = var.environment
-    namespace           = var.cloudwatch_namespace
-    system_log_group    = aws_cloudwatch_log_group.system.name
-    app_log_group       = aws_cloudwatch_log_group.application.name
-    security_log_group  = aws_cloudwatch_log_group.security.name
-    target_group_arn    = var.target_group_arn_suffix
-    load_balancer_arn   = var.load_balancer_arn_suffix
-  })
-}
-
-# CloudWatch Metric Alarms - CPU
-resource "aws_cloudwatch_metric_alarm" "high_cpu" {
-  for_each = var.enable_instance_alarms ? toset(var.instance_ids) : []
-
-  alarm_name          = "${var.environment}-high-cpu-${each.value}"
-  alarm_description   = "Triggers when CPU utilization exceeds ${var.cpu_threshold_percent}% for ${var.cpu_evaluation_periods * var.alarm_period / 60} minutes"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = var.cpu_evaluation_periods
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = var.alarm_period
-  statistic           = "Average"
-  threshold           = var.cpu_threshold_percent
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    InstanceId = each.value
-  }
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-high-cpu-${each.value}"
-      Environment = var.environment
-      AlarmType   = "cpu"
-    }
-  )
-}
-
-# CloudWatch Metric Alarms - Memory
-resource "aws_cloudwatch_metric_alarm" "high_memory" {
-  for_each = var.enable_instance_alarms ? toset(var.instance_ids) : []
-
-  alarm_name          = "${var.environment}-high-memory-${each.value}"
-  alarm_description   = "Triggers when memory utilization exceeds ${var.memory_threshold_percent}% for ${var.memory_evaluation_periods * var.alarm_period / 60} minutes"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = var.memory_evaluation_periods
-  metric_name         = "mem_used_percent"
-  namespace           = var.cloudwatch_namespace
-  period              = var.alarm_period
-  statistic           = "Average"
-  threshold           = var.memory_threshold_percent
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    InstanceId = each.value
-  }
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-high-memory-${each.value}"
-      Environment = var.environment
-      AlarmType   = "memory"
-    }
-  )
-}
-
-# CloudWatch Metric Alarms - Disk Space
-resource "aws_cloudwatch_metric_alarm" "low_disk_space" {
-  for_each = var.enable_instance_alarms ? toset(var.instance_ids) : []
-
-  alarm_name          = "${var.environment}-low-disk-space-${each.value}"
-  alarm_description   = "Triggers when disk space available is less than ${var.disk_free_threshold_percent}%"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = var.disk_evaluation_periods
-  metric_name         = "disk_free_percent"
-  namespace           = var.cloudwatch_namespace
-  period              = var.alarm_period
-  statistic           = "Average"
-  threshold           = var.disk_free_threshold_percent
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    InstanceId = each.value
-    path       = var.disk_mount_path
-    fstype     = var.disk_filesystem_type
-  }
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-low-disk-space-${each.value}"
-      Environment = var.environment
-      AlarmType   = "disk"
-    }
-  )
-}
-
-# CloudWatch Metric Alarms - Target Group Health
-resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
-  count = var.enable_target_group_alarms && var.target_group_arn_suffix != "" ? 1 : 0
-
-  alarm_name          = "${var.environment}-unhealthy-host-count"
-  alarm_description   = "Triggers when unhealthy host count is greater than ${var.unhealthy_host_threshold}"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = var.unhealthy_host_evaluation_periods
-  metric_name         = "UnHealthyHostCount"
-  namespace           = "AWS/ApplicationELB"
-  period              = var.alarm_period
-  statistic           = "Maximum"
-  threshold           = var.unhealthy_host_threshold
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    TargetGroup  = var.target_group_arn_suffix
-    LoadBalancer = var.load_balancer_arn_suffix
-  }
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-unhealthy-host-count"
-      Environment = var.environment
-      AlarmType   = "target-group"
-    }
-  )
-}
-
-# CloudWatch Metric Alarms - Application Errors
-resource "aws_cloudwatch_metric_alarm" "application_errors" {
-  alarm_name          = "${var.environment}-application-error-rate"
-  alarm_description   = "Triggers when application error rate exceeds ${var.error_rate_threshold} per minute"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = var.error_evaluation_periods
-  metric_name         = "ErrorCount"
-  namespace           = var.cloudwatch_namespace
-  period              = 60
-  statistic           = "Sum"
-  threshold           = var.error_rate_threshold
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-  treat_missing_data  = "notBreaching"
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-application-error-rate"
-      Environment = var.environment
-      AlarmType   = "application"
-    }
-  )
-}
-
-# CloudWatch Metric Alarms - Security Events
-resource "aws_cloudwatch_metric_alarm" "security_events" {
-  alarm_name          = "${var.environment}-critical-security-events"
-  alarm_description   = "Triggers when critical security events are detected"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "SecurityEvents"
-  namespace           = var.cloudwatch_namespace
-  period              = 60
-  statistic           = "Sum"
-  threshold           = 0
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  treat_missing_data  = "notBreaching"
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-critical-security-events"
-      Environment = var.environment
-      AlarmType   = "security"
-    }
-  )
-}
-
-# EventBridge Rules for Automation
-resource "aws_cloudwatch_event_rule" "instance_state_change" {
-  name        = "${var.environment}-instance-state-change"
-  description = "Capture EC2 instance state changes"
-
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["EC2 Instance State-change Notification"]
-    detail = {
-      state = ["stopped", "terminated", "stopping"]
-    }
-  })
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-instance-state-change"
-      Environment = var.environment
-    }
-  )
-}
-
-resource "aws_cloudwatch_event_target" "instance_state_change_sns" {
-  rule      = aws_cloudwatch_event_rule.instance_state_change.name
-  target_id = "SendToSNS"
-  arn       = aws_sns_topic.alerts.arn
-
-  input_transformer {
-    input_paths = {
-      instance = "$.detail.instance-id"
-      state    = "$.detail.state"
-      time     = "$.time"
-    }
-    input_template = "\"EC2 Instance <instance> has changed to state: <state> at <time>\""
-  }
-}
-
-resource "aws_cloudwatch_event_rule" "scheduled_health_check" {
-  name                = "${var.environment}-scheduled-health-check"
-  description         = "Trigger automated health checks"
-  schedule_expression = var.health_check_schedule
-  is_enabled          = var.enable_scheduled_health_checks
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-scheduled-health-check"
-      Environment = var.environment
-    }
-  )
-}
-
-resource "aws_cloudwatch_event_rule" "backup_trigger" {
-  name                = "${var.environment}-backup-trigger"
-  description         = "Trigger automated backups"
-  schedule_expression = var.backup_schedule
-  is_enabled          = var.enable_scheduled_backups
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-backup-trigger"
-      Environment = var.environment
-    }
-  )
-}
-
-resource "aws_cloudwatch_event_target" "backup_trigger_sns" {
-  rule      = aws_cloudwatch_event_rule.backup_trigger.name
-  target_id = "SendToSNS"
-  arn       = aws_sns_topic.alerts.arn
-
-  input_transformer {
-    input_paths = {
-      time = "$.time"
-    }
-    input_template = "\"Scheduled backup triggered at <time>\""
-  }
-}
-
-# X-Ray Tracing (Optional)
-resource "aws_xray_sampling_rule" "fleet_sampling" {
-  count = var.enable_xray ? 1 : 0
-
-  rule_name      = "${var.environment}-fleet-sampling"
-  priority       = var.xray_sampling_priority
-  version        = 1
-  reservoir_size = var.xray_reservoir_size
-  fixed_rate     = var.xray_fixed_rate
-  url_path       = "*"
-  host           = "*"
-  http_method    = "*"
-  service_type   = "*"
-  service_name   = "*"
-  resource_arn   = "*"
-
-  attributes = {
-    environment = var.environment
-  }
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-fleet-sampling"
-      Environment = var.environment
-    }
-  )
-}
-
-resource "aws_xray_group" "fleet_traces" {
-  count = var.enable_xray ? 1 : 0
-
-  group_name        = "${var.environment}-fleet-traces"
-  filter_expression = "service(\"${var.xray_service_name}\") { fault = true OR error = true OR responsetime > ${var.xray_response_time_threshold} }"
-
-  insights_configuration {
-    insights_enabled      = var.xray_insights_enabled
-    notifications_enabled = var.xray_notifications_enabled
-  }
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-fleet-traces"
-      Environment = var.environment
-    }
-  )
-}
-
-# CloudWatch Composite Alarms
-resource "aws_cloudwatch_composite_alarm" "critical_system_health" {
-  alarm_name          = "${var.environment}-critical-system-health"
-  alarm_description   = "Composite alarm for critical system health issues"
-  actions_enabled     = true
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-  actions_suppressor {
-    alarm            = aws_cloudwatch_metric_alarm.security_events.alarm_name
-    extension_period = 300
-    wait_period      = 60
-  }
-
-  alarm_rule = var.enable_target_group_alarms && var.target_group_arn_suffix != "" ? format(
-    "ALARM(%s) OR ALARM(%s)",
-    aws_cloudwatch_metric_alarm.unhealthy_hosts[0].alarm_name,
-    aws_cloudwatch_metric_alarm.application_errors.alarm_name
-  ) : format("ALARM(%s)", aws_cloudwatch_metric_alarm.application_errors.alarm_name)
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-critical-system-health"
-      Environment = var.environment
-      AlarmType   = "composite"
-    }
-  )
-}
-
-# Data sources
 data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+
+# -----------------------------------------------------------------------------
+# Local Values
+# -----------------------------------------------------------------------------
+
+locals {
+  # Common naming prefix
+  name_prefix = "${var.project_name}-${var.environment}"
+
+  # Merged tags applied to all resources
+  common_tags = merge(
+    var.tags,
+    {
+      Environment = var.environment
+      Project     = var.project_name
+      ManagedBy   = "terraform"
+      Module      = "observability"
+    }
+  )
+
+  # Feature flag defaults
+  dashboards_enabled = var.enable_dashboards
+  alarms_enabled     = var.enable_alarms
+  alerting_enabled   = var.enable_alerting
+  logging_enabled    = var.enable_logging
+}
+
+# -----------------------------------------------------------------------------
+# Alerting Submodule
+# -----------------------------------------------------------------------------
+# Creates SNS topics, subscriptions, Lambda processor, and EventBridge rules.
+# This is instantiated first as other modules depend on SNS topic ARNs.
+# -----------------------------------------------------------------------------
+
+module "alerting" {
+  source = "./alerting"
+  count  = local.alerting_enabled ? 1 : 0
+
+  environment  = var.environment
+  project_name = var.project_name
+  tags         = local.common_tags
+
+  # KMS Configuration
+  kms_key_arn             = var.kms_key_arn
+  kms_key_deletion_window = var.kms_key_deletion_window
+
+  # Email Subscriptions
+  email_endpoints = var.notification_emails
+
+  # SMS Subscriptions
+  sms_endpoints       = var.notification_sms
+  enable_security_sms = var.enable_security_sms
+
+  # Webhook/HTTPS Subscriptions
+  webhook_endpoints            = var.webhook_endpoints
+  webhook_auto_confirm         = var.webhook_auto_confirm
+  webhook_raw_message_delivery = var.webhook_raw_message_delivery
+
+  # Slack Integration
+  slack_webhook_url = var.slack_webhook_url
+
+  # PagerDuty Integration
+  pagerduty_integration_key = var.pagerduty_integration_key
+
+  # Lambda Processor Configuration
+  enable_lambda_processor     = var.enable_lambda_processor
+  lambda_log_level            = var.lambda_log_level
+  lambda_log_retention_days   = var.lambda_log_retention_days
+  lambda_reserved_concurrency = var.lambda_reserved_concurrency
+  lambda_vpc_config           = var.lambda_vpc_config
+  enable_xray_tracing         = var.enable_xray_tracing
+  enable_lambda_alarms        = var.enable_lambda_alarms
+  runbook_base_url            = var.runbook_base_url
+  enable_pii_redaction        = var.enable_pii_redaction
+
+  # SQS Configuration
+  enable_sqs_subscriptions = var.enable_sqs_subscriptions
+  enable_aggregate_queue   = var.enable_aggregate_queue
+
+  # EventBridge Configuration
+  enable_security_hub_rules = var.enable_security_hub_rules
+  enable_cost_anomaly_rules = var.enable_cost_anomaly_rules
+  enable_iam_monitoring     = var.enable_iam_monitoring
+
+  # Cross-Account Configuration
+  enable_cross_account_events = var.enable_cross_account_events
+  cross_account_ids           = var.cross_account_ids
+}
+
+# -----------------------------------------------------------------------------
+# Logging Submodule
+# -----------------------------------------------------------------------------
+# Creates CloudWatch Log Groups, metric filters, and Insights queries.
+# Provides centralized log management for the fleet.
+# -----------------------------------------------------------------------------
+
+module "logging" {
+  source = "./logging"
+  count  = local.logging_enabled ? 1 : 0
+
+  environment  = var.environment
+  project_name = var.project_name
+  tags         = local.common_tags
+
+  # Retention Configuration
+  retention_days = var.log_retention_days
+
+  # Encryption Configuration
+  kms_key_arn              = var.kms_key_arn
+  encrypt_application_logs = var.encrypt_application_logs
+  encrypt_system_logs      = var.encrypt_system_logs
+  encrypt_ssm_logs         = var.encrypt_ssm_logs
+  encrypt_dsc_logs         = var.encrypt_dsc_logs
+
+  # Log Group Configuration
+  log_group_class              = var.log_group_class
+  skip_destroy_on_deletion     = var.skip_destroy_on_deletion
+  enable_cross_service_logging = var.enable_cross_service_logging
+
+  # Data Protection
+  enable_data_protection     = var.enable_data_protection
+  data_identifiers_to_audit  = var.data_identifiers_to_audit
+  data_identifiers_to_redact = var.data_identifiers_to_redact
+
+  # Metric Filter Configuration
+  cloudwatch_namespace  = var.cloudwatch_namespace
+  custom_error_pattern  = var.custom_error_pattern
+  custom_metric_filters = var.custom_metric_filters
+
+  # S3 Archival Configuration
+  enable_s3_archival       = var.enable_s3_archival
+  archive_bucket_name      = var.archive_bucket_name
+  archive_kms_key_arn      = var.archive_kms_key_arn
+  archival_filter_pattern  = var.archival_filter_pattern
+  firehose_buffer_size     = var.firehose_buffer_size
+  firehose_buffer_interval = var.firehose_buffer_interval
+
+  # Lambda Processing Configuration
+  enable_lambda_processing        = var.enable_log_lambda_processing
+  lambda_processor_arn            = var.log_lambda_processor_arn
+  lambda_filter_pattern           = var.log_lambda_filter_pattern
+  enable_application_error_lambda = var.enable_application_error_lambda
+
+  # Cross-Account Sharing Configuration
+  enable_cross_account_sharing      = var.enable_cross_account_log_sharing
+  cross_account_destination_arn     = var.cross_account_log_destination_arn
+  cross_account_principal_arns      = var.cross_account_log_principal_arns
+  cross_account_share_security_logs = var.cross_account_share_security_logs
+  cross_account_filter_pattern      = var.cross_account_log_filter_pattern
+}
+
+# -----------------------------------------------------------------------------
+# Alarms Submodule
+# -----------------------------------------------------------------------------
+# Creates CloudWatch metric alarms with tiered severity levels.
+# Uses SNS topics from the alerting module for notifications.
+# -----------------------------------------------------------------------------
+
+module "alarms" {
+  source = "./alarms"
+  count  = local.alarms_enabled ? 1 : 0
+
+  environment  = var.environment
+  project_name = var.project_name
+  tags         = local.common_tags
+
+  # Instance Configuration
+  instance_ids   = var.instance_ids
+  ami_id         = var.ami_id
+  instance_type  = var.instance_type
+  ebs_volume_ids = var.ebs_volume_ids
+
+  # Auto Scaling Group Configuration
+  auto_scaling_group_names = var.auto_scaling_group_names
+  asg_minimum_capacity     = var.asg_minimum_capacity
+
+  # Alarm Thresholds
+  alarm_thresholds   = var.alarm_thresholds
+  evaluation_periods = var.evaluation_periods
+  period_seconds     = var.period_seconds
+
+  # Feature Toggles
+  enable_memory_alarms    = var.enable_memory_alarms
+  enable_disk_alarms      = var.enable_disk_alarms
+  enable_network_alarms   = var.enable_network_alarms
+  enable_ebs_alarms       = var.enable_ebs_alarms
+  enable_ssm_alarms       = var.enable_ssm_alarms
+  enable_composite_alarms = var.enable_composite_alarms
+
+  # Email Notification Configuration
+  notification_emails_critical = var.notification_emails_critical
+  notification_emails_warning  = var.notification_emails_warning
+  notification_emails_info     = var.notification_emails_info
+
+  # SMS Notification Configuration
+  notification_phone_numbers = var.notification_phone_numbers
+
+  # Lambda Notification Configuration
+  lambda_function_arn_critical = var.lambda_function_arn_critical
+  lambda_function_arn_warning  = var.lambda_function_arn_warning
+  lambda_function_arn_info     = var.lambda_function_arn_info
+
+  # Webhook Configuration
+  webhook_endpoints_critical = var.webhook_endpoints_critical
+  webhook_endpoints_warning  = var.webhook_endpoints_warning
+
+  # Application Health Check Configuration
+  health_check_configs = var.health_check_configs
+  target_group_arns    = var.target_group_arns
+
+  # SNS Configuration
+  sns_kms_key_id = var.kms_key_arn
+}
+
+# -----------------------------------------------------------------------------
+# Dashboards Submodule
+# -----------------------------------------------------------------------------
+# Creates CloudWatch dashboards for fleet health, security, and cost monitoring.
+# Visualizes metrics from all other observability components.
+# -----------------------------------------------------------------------------
+
+module "dashboards" {
+  source = "./dashboards"
+  count  = local.dashboards_enabled ? 1 : 0
+
+  # Common Configuration
+  environment  = var.environment
+  project_name = var.project_name
+  aws_region   = var.aws_region != "" ? var.aws_region : data.aws_region.current.name
+  tags         = local.common_tags
+
+  # Auto Scaling Group Configuration
+  auto_scaling_group_names = var.auto_scaling_group_names
+
+  # Instance Configuration
+  instance_ids = var.instance_ids
+
+  # Dashboard Configuration
+  alarm_thresholds           = var.dashboard_alarm_thresholds
+  dashboard_refresh_interval = var.dashboard_refresh_interval
+  cloudwatch_namespace       = var.cloudwatch_namespace
+  ssm_namespace              = var.ssm_namespace
+  metric_period_standard     = var.metric_period_standard
+  metric_period_detailed     = var.metric_period_detailed
+
+  # Feature Toggles
+  enable_ssm_status_widget         = var.enable_ssm_status_widget
+  enable_detailed_instance_metrics = var.enable_detailed_instance_metrics
+  enable_disk_by_volume            = var.enable_disk_by_volume
+
+  # Volume Configuration
+  ebs_volume_ids   = var.ebs_volume_ids
+  disk_mount_paths = var.disk_mount_paths
+
+  # Security Dashboard Configuration
+  security_environment                = var.environment
+  security_project_name               = var.project_name
+  security_guardduty_detector_id      = var.security_guardduty_detector_id
+  security_hub_enabled                = var.security_hub_enabled
+  security_vpc_flow_log_group_name    = var.security_vpc_flow_log_group_name
+  security_cloudtrail_log_group_name  = var.security_cloudtrail_log_group_name
+  security_windows_log_group_name     = var.security_windows_log_group_name
+  security_failed_login_threshold     = var.security_failed_login_threshold
+  security_rejected_packets_threshold = var.security_rejected_packets_threshold
+  security_api_error_threshold        = var.security_api_error_threshold
+  security_alarm_actions              = local.alerting_enabled ? [module.alerting[0].security_topic_arn] : var.security_alarm_actions
+  security_ok_actions                 = var.security_ok_actions
+  security_enable_dashboard           = var.enable_security_dashboard
+  security_enable_alarms              = var.enable_security_alarms
+  security_alarm_evaluation_periods   = var.security_alarm_evaluation_periods
+  security_enable_trend_analysis      = var.security_enable_trend_analysis
+  security_trend_analysis_hours       = var.security_trend_analysis_hours
+  security_tags                       = local.common_tags
+
+  # Cost Dashboard Configuration
+  cost_environment                     = var.environment
+  cost_project_name                    = var.project_name
+  cost_budget_amount                   = var.cost_budget_amount
+  cost_alert_thresholds                = var.cost_alert_thresholds
+  cost_enable_budget_alarms            = var.cost_enable_budget_alarms
+  cost_linked_accounts                 = var.cost_linked_accounts
+  cost_enable_linked_account_widgets   = var.cost_enable_linked_account_widgets
+  cost_enable_cost_anomaly_detection   = var.cost_enable_cost_anomaly_detection
+  cost_anomaly_monitor_type            = var.cost_anomaly_monitor_type
+  cost_anomaly_monitor_dimension       = var.cost_anomaly_monitor_dimension
+  cost_anomaly_threshold_expression    = var.cost_anomaly_threshold_expression
+  cost_anomaly_threshold_percentage    = var.cost_anomaly_threshold_percentage
+  cost_enable_service_anomaly_monitors = var.cost_enable_service_anomaly_monitors
+  cost_services_for_anomaly_detection  = var.cost_services_for_anomaly_detection
+  cost_sns_topic_arn                   = local.alerting_enabled ? module.alerting[0].cost_topic_arn : var.cost_sns_topic_arn
+  cost_alert_email_addresses           = var.cost_alert_email_addresses
+  cost_metric_period                   = var.cost_metric_period
+  cost_services_to_track               = var.cost_services_to_track
+  cost_instance_types_to_track         = var.cost_instance_types_to_track
+  cost_enable_environment_comparison   = var.cost_enable_environment_comparison
+  cost_environments_to_compare         = var.cost_environments_to_compare
+  cost_environment_account_map         = var.cost_environment_account_map
+  cost_kms_key_arn                     = var.kms_key_arn
+  cost_tags                            = local.common_tags
+}
