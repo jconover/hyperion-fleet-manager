@@ -1,0 +1,93 @@
+name: 'Run Security Scan'
+description: 'Run comprehensive security scanning on Terraform code'
+
+inputs:
+  directory:
+    description: 'Directory to scan'
+    required: false
+    default: 'infrastructure/'
+  upload_sarif:
+    description: 'Upload SARIF results to GitHub Security'
+    required: false
+    default: 'true'
+  fail_on_severity:
+    description: 'Fail on severity level (CRITICAL, HIGH, MEDIUM, LOW)'
+    required: false
+    default: 'HIGH'
+
+outputs:
+  checkov_passed:
+    description: 'Number of Checkov checks passed'
+    value: ${{ steps.checkov.outputs.passed }}
+  checkov_failed:
+    description: 'Number of Checkov checks failed'
+    value: ${{ steps.checkov.outputs.failed }}
+  tfsec_issues:
+    description: 'Number of tfsec issues found'
+    value: ${{ steps.tfsec.outputs.issues }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Checkov
+      id: checkov
+      uses: bridgecrewio/checkov-action@v12
+      with:
+        directory: ${{ inputs.directory }}
+        framework: terraform
+        output_format: cli,json,sarif
+        output_file_path: console,checkov-results.json,checkov-results.sarif
+        soft_fail: true
+        download_external_modules: true
+
+    - name: Parse Checkov results
+      shell: bash
+      run: |
+        if [ -f checkov-results.json ]; then
+          PASSED=$(jq -r '.summary.passed // 0' checkov-results.json)
+          FAILED=$(jq -r '.summary.failed // 0' checkov-results.json)
+          echo "passed=${PASSED}" >> $GITHUB_OUTPUT
+          echo "failed=${FAILED}" >> $GITHUB_OUTPUT
+          echo "Checkov: ${PASSED} passed, ${FAILED} failed"
+        fi
+
+    - name: Upload Checkov SARIF
+      if: inputs.upload_sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: checkov-results.sarif
+        category: checkov
+
+    - name: Run tfsec
+      id: tfsec
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        working_directory: ${{ inputs.directory }}
+        soft_fail: true
+        format: json,sarif
+        additional_args: --out=tfsec-results.json --out=tfsec-results.sarif
+
+    - name: Parse tfsec results
+      shell: bash
+      run: |
+        if [ -f tfsec-results.json ]; then
+          ISSUES=$(jq '.results | length' tfsec-results.json 2>/dev/null || echo "0")
+          echo "issues=${ISSUES}" >> $GITHUB_OUTPUT
+          echo "tfsec: ${ISSUES} issues found"
+        fi
+
+    - name: Upload tfsec SARIF
+      if: inputs.upload_sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: tfsec-results.sarif
+        category: tfsec
+
+    - name: Upload scan artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-scan-results
+        path: |
+          checkov-results.json
+          tfsec-results.json
+        retention-days: 30

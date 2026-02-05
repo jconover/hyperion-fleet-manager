@@ -1,0 +1,77 @@
+name: 'Post Terraform Plan to PR'
+description: 'Post Terraform plan output as a PR comment'
+
+inputs:
+  plan_file:
+    description: 'Path to Terraform plan text file'
+    required: true
+  environment:
+    description: 'Environment name'
+    required: true
+  github_token:
+    description: 'GitHub token for posting comments'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Read plan file
+      id: plan
+      shell: bash
+      run: |
+        if [ ! -f "${{ inputs.plan_file }}" ]; then
+          echo "Plan file not found: ${{ inputs.plan_file }}"
+          exit 1
+        fi
+
+        # Read and truncate if necessary
+        PLAN_CONTENT=$(cat "${{ inputs.plan_file }}")
+        PLAN_LENGTH=${#PLAN_CONTENT}
+
+        if [ ${PLAN_LENGTH} -gt 65000 ]; then
+          echo "Plan output is too large (${PLAN_LENGTH} characters), truncating..."
+          PLAN_CONTENT="${PLAN_CONTENT:0:65000}
+
+... (output truncated - full plan available in artifacts)"
+        fi
+
+        # Save to output file for the next step
+        echo "${PLAN_CONTENT}" > plan-output.txt
+
+    - name: Post plan comment
+      uses: actions/github-script@v7
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          const fs = require('fs');
+          const environment = process.env.ENVIRONMENT;
+          const plan = fs.readFileSync('plan-output.txt', 'utf8');
+
+          const output = `### Terraform Plan: \`${environment}\`
+
+          <details>
+          <summary>Click to expand plan output</summary>
+
+          \`\`\`terraform
+          ${plan}
+          \`\`\`
+          </details>
+
+          **Environment:** ${environment}
+          **Workflow:** [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+          `;
+
+          // Only post to PR if this is a pull request event
+          if (context.eventName === 'pull_request') {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+          } else {
+            console.log('Not a PR event, skipping comment');
+            console.log(output);
+          }
