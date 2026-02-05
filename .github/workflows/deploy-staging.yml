@@ -63,7 +63,7 @@ jobs:
           terraform show -no-color tfplan.binary > tfplan.txt
 
       - name: Upload plan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: terraform-plan-staging
           path: |
@@ -127,7 +127,7 @@ jobs:
           cat outputs.json
 
       - name: Upload outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: terraform-outputs-staging
           path: infrastructure/environments/staging/outputs.json

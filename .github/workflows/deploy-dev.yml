@@ -68,7 +68,7 @@ jobs:
           terraform show -no-color tfplan.binary > tfplan.txt
 
       - name: Upload plan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: terraform-plan-dev
           path: infrastructure/environments/dev/tfplan.txt
@@ -88,7 +88,7 @@ jobs:
           cat outputs.json
 
       - name: Upload outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: terraform-outputs-dev
           path: infrastructure/environments/dev/outputs.json

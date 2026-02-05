@@ -121,7 +121,7 @@ jobs:
           cat tflint-results.txt
 
       - name: Upload TFLint results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: tflint-results
           path: tflint-results.txt
@@ -154,7 +154,7 @@ jobs:
 
       - name: Upload Checkov JSON results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: checkov-results
           path: checkov-results.json
@@ -219,7 +219,7 @@ jobs:
 
       - name: Upload tfsec results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: tfsec-results
           path: |
@@ -294,7 +294,7 @@ jobs:
 
       - name: Upload PSScriptAnalyzer results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: psscriptanalyzer-results
           path: psanalyzer-results.json
@@ -341,7 +341,7 @@ jobs:
           terraform show -no-color tfplan.binary > tfplan.txt
 
       - name: Upload plan artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: terraform-plan-${{ matrix.environment }}
           path: infrastructure/environments/${{ matrix.environment }}/tfplan.txt
