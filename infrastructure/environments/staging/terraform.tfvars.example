@@ -1,0 +1,41 @@
+# Staging Environment Configuration
+# These values override the defaults in variables.tf
+
+# General
+aws_region   = "us-east-1"
+environment  = "staging"
+project_name = "hyperion-fleet"
+owner        = "platform-team"
+cost_center  = "engineering"
+
+# Networking - Higher availability with 3 AZs
+vpc_cidr             = "10.10.0.0/16"
+availability_zones   = ["us-east-1a", "us-east-1b", "us-east-1c"]
+private_subnet_cidrs = ["10.10.1.0/24", "10.10.2.0/24", "10.10.3.0/24"]
+public_subnet_cidrs  = ["10.10.101.0/24", "10.10.102.0/24", "10.10.103.0/24"]
+
+# NAT Gateway per AZ for better resilience
+enable_nat_gateway = true
+single_nat_gateway = false
+
+# Security
+allowed_cidr_blocks   = ["10.0.0.0/8"]
+enable_kms_encryption = true
+
+# Compute - Production-like sizing
+instance_type  = "t3.large"
+instance_count = 3
+ssh_key_name   = "staging-key"  # Update with your actual key name
+
+# Auto Scaling - Higher capacity for staging
+enable_auto_scaling  = true
+asg_min_size         = 2
+asg_max_size         = 8
+asg_desired_capacity = 3
+
+# Observability - Longer retention for staging
+log_retention_days         = 30
+enable_detailed_monitoring = true
+enable_cpu_alarm           = true
+cpu_alarm_threshold        = 75
+alarm_notification_email   = "platform-team@example.com"  # Update with actual email

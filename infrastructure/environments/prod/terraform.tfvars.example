@@ -1,0 +1,42 @@
+# Production Environment Configuration
+# These values override the defaults in variables.tf
+# CRITICAL: Review all values before applying to production
+
+# General
+aws_region   = "us-east-1"
+environment  = "prod"
+project_name = "hyperion-fleet"
+owner        = "platform-team"
+cost_center  = "production"
+
+# Networking - Multi-AZ for high availability
+vpc_cidr             = "10.20.0.0/16"
+availability_zones   = ["us-east-1a", "us-east-1b", "us-east-1c"]
+private_subnet_cidrs = ["10.20.1.0/24", "10.20.2.0/24", "10.20.3.0/24"]
+public_subnet_cidrs  = ["10.20.101.0/24", "10.20.102.0/24", "10.20.103.0/24"]
+
+# High Availability - NAT Gateway per AZ
+enable_nat_gateway = true
+single_nat_gateway = false  # MUST be false for production
+
+# Security - Strict controls for production
+allowed_cidr_blocks   = ["10.0.0.0/8"]
+enable_kms_encryption = true  # REQUIRED for production
+
+# Compute - Production-grade instances
+instance_type  = "m5.xlarge"
+instance_count = 6
+ssh_key_name   = "prod-key"  # Update with your actual key name
+
+# Auto Scaling - High availability and capacity
+enable_auto_scaling  = true
+asg_min_size         = 3   # Minimum 3 for HA across AZs
+asg_max_size         = 12
+asg_desired_capacity = 6
+
+# Observability - Comprehensive monitoring and long retention
+log_retention_days         = 90  # Compliance requirement
+enable_detailed_monitoring = true  # REQUIRED for production
+enable_cpu_alarm           = true
+cpu_alarm_threshold        = 70  # Lower threshold for production
+alarm_notification_email   = "production-alerts@example.com"  # Update with actual email
