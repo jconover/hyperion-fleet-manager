@@ -46,7 +46,7 @@ jobs:
 
       - name: Post Format Check Results
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           FMT_OUTCOME: ${{ steps.fmt.outcome }}
         with:
@@ -162,7 +162,7 @@ jobs:
 
       - name: Comment Checkov results on PR
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
@@ -229,7 +229,7 @@ jobs:
 
       - name: Comment tfsec results on PR
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
@@ -348,7 +348,7 @@ jobs:
           retention-days: 30
 
       - name: Comment Plan on PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           ENVIRONMENT: ${{ matrix.environment }}
         with:
@@ -434,7 +434,7 @@ jobs:
     if: always()
     steps:
       - name: Check validation results
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           FMT_RESULT: ${{ needs.terraform-fmt.result }}
           VALIDATE_RESULT: ${{ needs.terraform-validate.result }}
