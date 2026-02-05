@@ -1,0 +1,88 @@
+OBSERVABILITY MODULE - FILE PATHS REFERENCE
+===========================================
+
+Module Base Path:
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/
+
+TERRAFORM CONFIGURATION FILES
+------------------------------
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/main.tf
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/variables.tf
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/outputs.tf
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/versions.tf
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/examples.tf
+
+DOCUMENTATION FILES
+-------------------
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/README.md
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/QUICKSTART.md
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/MODULE_SUMMARY.md
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/CHANGELOG.md
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/INDEX.md
+
+CONFIGURATION FILES
+-------------------
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/cloudwatch-agent-config.json
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/terraform.tfvars.example
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/dashboards/fleet-health.json
+
+UTILITY FILES
+-------------
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/validate.sh
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/.terraform-docs.yml
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/.gitignore
+
+TEST FILES
+----------
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/test/basic_test.tf
+
+DIRECTORY STRUCTURE
+-------------------
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/
+├── dashboards/
+│   └── fleet-health.json
+├── test/
+│   └── basic_test.tf
+├── main.tf
+├── variables.tf
+├── outputs.tf
+├── versions.tf
+├── examples.tf
+├── README.md
+├── QUICKSTART.md
+├── MODULE_SUMMARY.md
+├── CHANGELOG.md
+├── INDEX.md
+├── cloudwatch-agent-config.json
+├── terraform.tfvars.example
+├── validate.sh
+├── .terraform-docs.yml
+├── .gitignore
+└── FILE_PATHS.txt
+
+QUICK ACCESS COMMANDS
+---------------------
+# Navigate to module
+cd /home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/
+
+# Read main documentation
+cat /home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/README.md
+
+# Read quick start
+cat /home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/QUICKSTART.md
+
+# View main configuration
+cat /home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/main.tf
+
+# Copy example config
+cp /home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/terraform.tfvars.example terraform.tfvars
+
+# Run validation
+/home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/validate.sh
+
+# View dashboard definition
+cat /home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/dashboards/fleet-health.json
+
+# View CloudWatch agent config
+cat /home/justin/Projects/hyperion-fleet-manager/infrastructure/modules/observability/cloudwatch-agent-config.json
+

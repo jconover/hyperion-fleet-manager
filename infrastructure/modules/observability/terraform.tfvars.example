@@ -1,0 +1,119 @@
+# Example Terraform variables for the observability module
+# Copy this file to terraform.tfvars and customize for your environment
+
+# Environment Configuration
+environment = "production"
+
+# SNS Alert Configuration
+alert_email_addresses = [
+  "ops-team@example.com",
+  "platform-team@example.com"
+]
+
+# Instance Monitoring
+instance_ids = [
+  "i-1234567890abcdef0",
+  "i-0987654321fedcba0",
+  "i-abcdef1234567890"
+]
+
+enable_instance_alarms = true
+
+# Target Group Configuration (get these from your load balancer module)
+target_group_arn_suffix  = "targetgroup/fleet-tg/1234567890abcdef"
+load_balancer_arn_suffix = "app/fleet-alb/1234567890abcdef"
+
+enable_target_group_alarms = true
+
+# Alarm Thresholds - CPU
+cpu_threshold_percent  = 80
+cpu_evaluation_periods = 3  # 15 minutes (3 periods * 5 min)
+
+# Alarm Thresholds - Memory
+memory_threshold_percent  = 85
+memory_evaluation_periods = 3  # 15 minutes
+
+# Alarm Thresholds - Disk
+disk_free_threshold_percent = 15
+disk_evaluation_periods     = 2  # 10 minutes
+disk_mount_path             = "/"
+disk_filesystem_type        = "ext4"
+
+# Alarm Thresholds - Target Group
+unhealthy_host_threshold           = 0
+unhealthy_host_evaluation_periods  = 2  # 10 minutes
+
+# Alarm Thresholds - Application Errors
+error_rate_threshold     = 10  # errors per minute
+error_evaluation_periods = 2   # 2 minutes
+
+# Alarm Period
+alarm_period = 300  # 5 minutes in seconds
+
+# Log Configuration
+log_retention_days          = 30
+security_log_retention_days = 90
+
+# Optional: KMS encryption for logs (provide KMS key ID)
+# kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+
+# CloudWatch Configuration
+cloudwatch_namespace = "FleetManager"
+
+# EventBridge Configuration
+health_check_schedule          = "rate(5 minutes)"
+enable_scheduled_health_checks = true
+
+backup_schedule          = "cron(0 2 * * ? *)"  # 2 AM UTC daily
+enable_scheduled_backups = true
+
+# X-Ray Configuration
+enable_xray                   = true
+xray_sampling_priority        = 1000
+xray_reservoir_size           = 1
+xray_fixed_rate               = 0.05  # 5% sampling
+xray_service_name             = "fleet-manager"
+xray_response_time_threshold  = 3     # seconds
+xray_insights_enabled         = true
+xray_notifications_enabled    = false
+
+# Tags
+tags = {
+  Project     = "fleet-manager"
+  ManagedBy   = "terraform"
+  CostCenter  = "engineering"
+  Team        = "platform"
+  Compliance  = "pci-dss"
+}
+
+# Example configurations for different environments:
+
+# Development Environment
+# environment                    = "dev"
+# log_retention_days             = 7
+# security_log_retention_days    = 30
+# cpu_threshold_percent          = 90
+# memory_threshold_percent       = 95
+# enable_xray                    = false
+# enable_scheduled_backups       = false
+
+# Staging Environment
+# environment                    = "staging"
+# log_retention_days             = 30
+# security_log_retention_days    = 90
+# cpu_threshold_percent          = 85
+# memory_threshold_percent       = 90
+# xray_fixed_rate                = 0.10
+
+# Production Environment (with stricter thresholds)
+# environment                    = "production"
+# log_retention_days             = 90
+# security_log_retention_days    = 365
+# cpu_threshold_percent          = 75
+# memory_threshold_percent       = 80
+# disk_free_threshold_percent    = 20
+# unhealthy_host_threshold       = 0
+# error_rate_threshold           = 5
+# xray_fixed_rate                = 0.10
+# xray_insights_enabled          = true
+# xray_notifications_enabled     = true
