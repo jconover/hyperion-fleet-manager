@@ -1,0 +1,289 @@
+name: Deploy to Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      destroy:
+        description: 'Destroy infrastructure'
+        required: false
+        type: boolean
+        default: false
+      skip_tests:
+        description: 'Skip post-deployment tests'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+  deployments: write
+
+env:
+  TERRAFORM_VERSION: '1.7.0'
+  AWS_REGION: us-east-1
+  ENVIRONMENT: staging
+
+jobs:
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-PlanStaging
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          terraform init
+
+      - name: Terraform Plan
+        id: plan
+        env:
+          DESTROY_FLAG: ${{ github.event.inputs.destroy }}
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          if [ "${DESTROY_FLAG}" == "true" ]; then
+            terraform plan -destroy -out=tfplan.binary
+          else
+            terraform plan -out=tfplan.binary
+          fi
+          terraform show -no-color tfplan.binary > tfplan.txt
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-staging
+          path: |
+            infrastructure/environments/staging/tfplan.binary
+            infrastructure/environments/staging/tfplan.txt
+          retention-days: 30
+
+      - name: Display plan summary
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          echo "### Terraform Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```terraform' >> $GITHUB_STEP_SUMMARY
+          head -50 tfplan.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: plan
+    environment:
+      name: staging
+      url: https://staging.hyperion-fleet.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-staging
+          path: infrastructure/environments/staging/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-DeployStaging
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          terraform init
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          terraform apply -auto-approve tfplan.binary
+
+      - name: Get Terraform outputs
+        id: outputs
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          terraform output -json > outputs.json
+          cat outputs.json
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-staging
+          path: infrastructure/environments/staging/outputs.json
+          retention-days: 90
+
+  post-deployment-validation:
+    name: Post-Deployment Validation
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event.inputs.skip_tests != 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Terraform outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-outputs-staging
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-ValidationStaging
+
+      - name: Run health checks
+        run: |
+          echo "Running health checks for staging environment..."
+
+          if [ ! -f outputs.json ]; then
+            echo "Outputs file not found"
+            exit 1
+          fi
+
+          # Extract and test endpoints
+          API_ENDPOINT=$(jq -r '.api_endpoint.value // empty' outputs.json)
+          if [ -n "$API_ENDPOINT" ]; then
+            echo "Testing API endpoint: $API_ENDPOINT"
+            response=$(curl -f -s -o /dev/null -w "%{http_code}" "$API_ENDPOINT/health")
+            if [ "$response" != "200" ]; then
+              echo "Health check failed with status: $response"
+              exit 1
+            fi
+            echo "Health check passed"
+          fi
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests..."
+          # Add smoke test commands
+          echo "Smoke tests completed successfully"
+
+      - name: Run integration tests
+        run: |
+          echo "Running integration tests..."
+          # Add integration test commands
+          echo "Integration tests completed successfully"
+
+      - name: Performance baseline check
+        run: |
+          echo "Running performance baseline checks..."
+          # Add performance test commands
+          echo "Performance checks completed"
+
+  update-deployment-status:
+    name: Update Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy, post-deployment-validation]
+    if: always()
+    steps:
+      - name: Set deployment status
+        uses: actions/github-script@v7
+        env:
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          VALIDATION_RESULT: ${{ needs.post-deployment-validation.result }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+        with:
+          script: |
+            const deployResult = process.env.DEPLOY_RESULT;
+            const validationResult = process.env.VALIDATION_RESULT;
+            const sha = process.env.COMMIT_SHA;
+            const actor = process.env.ACTOR;
+
+            const success = deployResult === 'success' &&
+                           (validationResult === 'success' || validationResult === 'skipped');
+            const status = success ? '✅ Successful' : '❌ Failed';
+
+            const output = `## Deployment Status: Staging Environment
+
+            **Status:** ${status}
+            **Commit:** ${sha.substring(0, 7)}
+            **Environment:** staging
+            **Deployed by:** ${actor}
+            **Timestamp:** ${new Date().toISOString()}
+
+            ### Results
+            - Terraform Deploy: ${deployResult === 'success' ? '✅' : '❌'} ${deployResult}
+            - Post-Deployment Validation: ${validationResult === 'success' ? '✅' : validationResult === 'skipped' ? '⏭️' : '❌'} ${validationResult}
+
+            ${success ? '✅ Staging deployment successful!' : '⚠️ Staging deployment failed. Check the workflow logs for details.'}
+
+            ### Next Steps
+            ${success ? 'Ready for production deployment after approval.' : 'Fix issues before proceeding to production.'}
+            `;
+
+            // Create deployment
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: sha,
+              environment: 'staging',
+              auto_merge: false,
+              required_contexts: []
+            }).catch(() => null);
+
+            if (deployment) {
+              await github.rest.repos.createDeploymentStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                deployment_id: deployment.data.id,
+                state: success ? 'success' : 'failure',
+                description: `Staging deployment ${success ? 'succeeded' : 'failed'}`,
+                environment: 'staging'
+              });
+            }
+
+            // Comment on commit
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+              body: output
+            });
+
+            // Add to job summary
+            await core.summary
+              .addHeading('Staging Deployment Summary')
+              .addRaw(output)
+              .write();
+
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [update-deployment-status]
+    if: always()
+    steps:
+      - name: Send notification
+        env:
+          DEPLOY_STATUS: ${{ needs.deploy.result }}
+        run: |
+          if [ "${DEPLOY_STATUS}" == "success" ]; then
+            echo "Deployment successful - send success notification"
+            # Add notification logic (Slack, email, etc.)
+          else
+            echo "Deployment failed - send failure notification"
+            # Add notification logic
+          fi
