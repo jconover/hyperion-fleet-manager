@@ -1,0 +1,25 @@
+# Code Owners for Hyperion Fleet Manager
+
+# Default owners for everything in the repo
+* @devops-team
+
+# GitHub Actions workflows
+/.github/workflows/ @devops-team @platform-engineering
+
+# Terraform infrastructure
+/infrastructure/ @devops-team @infrastructure-team
+
+# Production environment (requires additional approval)
+/infrastructure/environments/prod/ @devops-team @senior-devops @infrastructure-leads
+
+# Security and compliance
+/infrastructure/modules/security/ @security-team @devops-team
+
+# Networking
+/infrastructure/modules/networking/ @network-team @devops-team
+
+# CI/CD configurations
+/.github/workflows/deploy-*.yml @devops-team @release-managers
+
+# Monitoring and observability
+/infrastructure/modules/observability/ @sre-team @devops-team
