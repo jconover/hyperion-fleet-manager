@@ -1,0 +1,485 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'infrastructure/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  TERRAFORM_VERSION: '1.7.0'
+  TFLINT_VERSION: 'v0.50.0'
+  CHECKOV_VERSION: '3.2.0'
+  TFSEC_VERSION: '1.28.5'
+  INFRACOST_VERSION: '0.10.35'
+  AWS_REGION: us-east-1
+
+jobs:
+  terraform-fmt:
+    name: Terraform Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        id: fmt
+        run: |
+          echo "Checking Terraform formatting..."
+          terraform fmt -check -recursive infrastructure/
+        continue-on-error: true
+
+      - name: Post Format Check Results
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          FMT_OUTCOME: ${{ steps.fmt.outcome }}
+        with:
+          script: |
+            const outcome = process.env.FMT_OUTCOME;
+            const output = `#### Terraform Format Check: \`${outcome}\`
+
+            ${outcome === 'success' ? '✅ All Terraform files are properly formatted' : '❌ Some files need formatting. Run `terraform fmt -recursive infrastructure/`'}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail on format issues
+        if: steps.fmt.outcome == 'failure'
+        run: exit 1
+
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure/environments/${{ matrix.environment }}
+          terraform init -backend=false
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          cd infrastructure/environments/${{ matrix.environment }}
+          terraform validate -no-color
+
+  tflint-scan:
+    name: TFLint Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache TFLint plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.tflint.d/plugins
+          key: ${{ runner.os }}-tflint-${{ hashFiles('.tflint.hcl') }}
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - name: Initialize TFLint
+        run: tflint --init
+
+      - name: Run TFLint
+        id: tflint
+        run: |
+          tflint --format=compact --recursive infrastructure/ > tflint-results.txt 2>&1 || true
+          cat tflint-results.txt
+
+      - name: Upload TFLint results
+        uses: actions/upload-artifact@v4
+        with:
+          name: tflint-results
+          path: tflint-results.txt
+          retention-days: 30
+
+  checkov-scan:
+    name: Checkov Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Checkov
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infrastructure/
+          framework: terraform
+          output_format: cli,json,sarif
+          output_file_path: console,checkov-results.json,checkov-results.sarif
+          soft_fail: true
+          download_external_modules: true
+
+      - name: Upload Checkov results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov
+
+      - name: Upload Checkov JSON results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-results
+          path: checkov-results.json
+          retention-days: 30
+
+      - name: Comment Checkov results on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('checkov-results.json', 'utf8'));
+
+            const passed = results.summary?.passed || 0;
+            const failed = results.summary?.failed || 0;
+            const skipped = results.summary?.skipped || 0;
+
+            const output = `#### Checkov Security Scan Results
+
+            | Status | Count |
+            |--------|-------|
+            | ✅ Passed | ${passed} |
+            | ❌ Failed | ${failed} |
+            | ⏭️ Skipped | ${skipped} |
+
+            ${failed > 0 ? '⚠️ Security issues detected. Review the detailed results in the Actions artifacts.' : '✅ No security issues detected.'}
+
+            <details>
+            <summary>View detailed results</summary>
+
+            See the uploaded artifacts for full scan results.
+            </details>`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  tfsec-scan:
+    name: tfsec Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: infrastructure/
+          soft_fail: true
+          format: json,sarif,markdown
+          additional_args: --out=tfsec-results.json --out=tfsec-results.sarif --out=tfsec-results.md
+
+      - name: Upload tfsec results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: tfsec-results.sarif
+          category: tfsec
+
+      - name: Upload tfsec results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfsec-results
+          path: |
+            tfsec-results.json
+            tfsec-results.md
+          retention-days: 30
+
+      - name: Comment tfsec results on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let markdown = '';
+            try {
+              markdown = fs.readFileSync('tfsec-results.md', 'utf8');
+            } catch (error) {
+              markdown = 'No issues found or report not generated.';
+            }
+
+            const output = `#### tfsec Security Scan Results
+
+            <details>
+            <summary>View detailed results</summary>
+
+            ${markdown}
+            </details>`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  powershell-lint:
+    name: PowerShell Script Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Run PSScriptAnalyzer
+        id: psanalyzer
+        shell: pwsh
+        run: |
+          $scripts = Get-ChildItem -Path . -Recurse -Include *.ps1, *.psm1
+          if ($scripts.Count -eq 0) {
+            Write-Output "No PowerShell scripts found to analyze"
+            exit 0
+          }
+
+          $results = @()
+          foreach ($script in $scripts) {
+            $analysis = Invoke-ScriptAnalyzer -Path $script.FullName -Severity Warning,Error
+            $results += $analysis
+          }
+
+          if ($results.Count -gt 0) {
+            $results | Format-Table -AutoSize
+            $results | ConvertTo-Json | Out-File -FilePath psanalyzer-results.json
+            Write-Output "Found $($results.Count) issues"
+          } else {
+            Write-Output "No issues found"
+          }
+
+      - name: Upload PSScriptAnalyzer results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: psscriptanalyzer-results
+          path: psanalyzer-results.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: [terraform-fmt, terraform-validate]
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[format('AWS_ROLE_{0}', matrix.environment)] }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-TerraformPlan-${{ matrix.environment }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          terraform init
+
+      - name: Terraform Plan
+        id: plan
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          cd infrastructure/environments/${ENVIRONMENT}
+          terraform plan -no-color -out=tfplan.binary
+          terraform show -no-color tfplan.binary > tfplan.txt
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ matrix.environment }}
+          path: infrastructure/environments/${{ matrix.environment }}/tfplan.txt
+          retention-days: 30
+
+      - name: Comment Plan on PR
+        uses: actions/github-script@v7
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        with:
+          script: |
+            const fs = require('fs');
+            const environment = process.env.ENVIRONMENT;
+            const plan = fs.readFileSync(`infrastructure/environments/${environment}/tfplan.txt`, 'utf8');
+            const truncatedPlan = plan.length > 65000 ? plan.substring(0, 65000) + '\n... (truncated)' : plan;
+
+            const output = `#### Terraform Plan: \`${environment}\`
+
+            <details>
+            <summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${truncatedPlan}
+            \`\`\`
+            </details>`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  infracost:
+    name: Cost Estimation
+    runs-on: ubuntu-latest
+    needs: [terraform-plan]
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Infracost
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Generate Infracost JSON
+        run: |
+          for env in dev staging prod; do
+            cd infrastructure/environments/${env}
+            terraform init
+            terraform plan -out=tfplan.binary
+            terraform show -json tfplan.binary > plan.json
+            infracost breakdown --path plan.json --format json --out-file /tmp/infracost-${env}.json
+            cd -
+          done
+
+      - name: Post Infracost comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          infracost comment github \
+            --path=/tmp/infracost-*.json \
+            --repo=$GITHUB_REPOSITORY \
+            --github-token=${GITHUB_TOKEN} \
+            --pull-request=${PR_NUMBER} \
+            --behavior=update
+
+  validation-summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [terraform-fmt, terraform-validate, tflint-scan, checkov-scan, tfsec-scan, powershell-lint, terraform-plan]
+    if: always()
+    steps:
+      - name: Check validation results
+        uses: actions/github-script@v7
+        env:
+          FMT_RESULT: ${{ needs.terraform-fmt.result }}
+          VALIDATE_RESULT: ${{ needs.terraform-validate.result }}
+          TFLINT_RESULT: ${{ needs.tflint-scan.result }}
+          CHECKOV_RESULT: ${{ needs.checkov-scan.result }}
+          TFSEC_RESULT: ${{ needs.tfsec-scan.result }}
+          PS_RESULT: ${{ needs.powershell-lint.result }}
+          PLAN_RESULT: ${{ needs.terraform-plan.result }}
+        with:
+          script: |
+            const jobs = [
+              { name: 'Terraform Format', status: process.env.FMT_RESULT },
+              { name: 'Terraform Validate', status: process.env.VALIDATE_RESULT },
+              { name: 'TFLint', status: process.env.TFLINT_RESULT },
+              { name: 'Checkov', status: process.env.CHECKOV_RESULT },
+              { name: 'tfsec', status: process.env.TFSEC_RESULT },
+              { name: 'PowerShell Lint', status: process.env.PS_RESULT },
+              { name: 'Terraform Plan', status: process.env.PLAN_RESULT }
+            ];
+
+            const passed = jobs.filter(j => j.status === 'success').length;
+            const failed = jobs.filter(j => j.status === 'failure').length;
+            const skipped = jobs.filter(j => j.status === 'skipped').length;
+
+            let table = '| Check | Status |\n|-------|--------|\n';
+            jobs.forEach(job => {
+              const icon = job.status === 'success' ? '✅' : job.status === 'failure' ? '❌' : '⏭️';
+              table += `| ${job.name} | ${icon} ${job.status} |\n`;
+            });
+
+            const output = `## PR Validation Summary
+
+            **Results:** ${passed} passed, ${failed} failed, ${skipped} skipped
+
+            ${table}
+
+            ${failed > 0 ? '⚠️ Some checks failed. Please review the details above.' : '✅ All validation checks passed!'}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail if any validation failed
+        if: contains(needs.*.result, 'failure')
+        run: exit 1
