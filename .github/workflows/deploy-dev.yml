@@ -35,7 +35,7 @@ jobs:
       url: https://dev.hyperion-fleet.example.com
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -100,7 +100,7 @@ jobs:
     needs: deploy
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download Terraform outputs
         uses: actions/download-artifact@v4
