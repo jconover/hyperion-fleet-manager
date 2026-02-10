@@ -151,7 +151,7 @@ jobs:
     if: always()
     steps:
       - name: Set deployment status
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           SMOKE_RESULT: ${{ needs.smoke-tests.result }}

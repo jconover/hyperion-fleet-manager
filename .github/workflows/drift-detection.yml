@@ -269,7 +269,7 @@ jobs:
 
       - name: Create or update drift issue
         if: steps.summary.outputs.has_critical_drift == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
