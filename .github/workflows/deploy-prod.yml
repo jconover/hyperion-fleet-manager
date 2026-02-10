@@ -149,7 +149,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: terraform-plan-prod
           path: infrastructure/environments/prod/
@@ -207,7 +207,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download Terraform outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: terraform-outputs-prod
 

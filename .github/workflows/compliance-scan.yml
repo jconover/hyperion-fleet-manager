@@ -198,7 +198,7 @@ jobs:
     if: always()
     steps:
       - name: Download all compliance results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: compliance-reports/
 
