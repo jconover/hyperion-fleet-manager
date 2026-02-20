@@ -60,7 +60,7 @@ jobs:
 
       - name: Upload scan results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: compliance-scan-results
           path: |
@@ -106,7 +106,7 @@ jobs:
 
       - name: Upload compliance results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: aws-config-compliance-${{ matrix.environment }}
           path: config-compliance-${{ matrix.environment }}.json
@@ -153,7 +153,7 @@ jobs:
 
       - name: Upload Security Hub findings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: securityhub-findings-${{ matrix.environment }}
           path: securityhub-findings-${{ matrix.environment }}.json
@@ -185,7 +185,7 @@ jobs:
           echo "IAM policy review completed"
 
       - name: Upload IAM analysis
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: iam-compliance-report
           path: iam-policies.json
@@ -254,7 +254,7 @@ jobs:
           cat compliance-summary.md
 
       - name: Upload summary report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: compliance-summary-report
           path: compliance-summary.md
