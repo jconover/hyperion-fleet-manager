@@ -134,11 +134,13 @@ jobs:
           fi
 
       - name: Check for command injection vulnerabilities
+        env:
+          PATTERN: '\$\{\{.*github\.event\.'
         run: |
           echo "Checking for command injection patterns..."
 
           # Look for direct use of github.event in run commands (unsafe)
-          if grep -r '\${{.*github\.event\.' .github/workflows/ --include="*.yml" | grep 'run:' -A 5 | grep -v 'env:'; then
+          if grep -r "$PATTERN" .github/workflows/ --include="*.yml" | grep 'run:' -A 5 | grep -v 'env:'; then
             echo "Warning: Potential command injection vulnerability detected"
             echo "Use environment variables instead of direct interpolation"
             exit 1
