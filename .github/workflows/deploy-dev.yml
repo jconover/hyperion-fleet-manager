@@ -18,7 +18,7 @@ on:
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
   pull-requests: write
 
 env:
@@ -197,6 +197,8 @@ jobs:
               repo: context.repo.repo,
               commit_sha: sha,
               body: output
+            }).catch(() => {
+              console.log('Could not create commit comment');
             });
 
   notify-on-failure:
