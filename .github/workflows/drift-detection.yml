@@ -65,7 +65,7 @@ jobs:
 
       - name: Upload drift report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: drift-report-dev
           path: infrastructure/environments/dev/drift-plan.txt
@@ -126,7 +126,7 @@ jobs:
 
       - name: Upload drift report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: drift-report-staging
           path: infrastructure/environments/staging/drift-plan.txt
@@ -187,7 +187,7 @@ jobs:
 
       - name: Upload drift report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: drift-report-prod
           path: infrastructure/environments/prod/drift-plan.txt
@@ -264,7 +264,7 @@ jobs:
           cat drift-summary.md
 
       - name: Upload summary report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: drift-summary-report
           path: drift-summary.md
