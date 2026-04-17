@@ -110,18 +110,18 @@ module "observability_xray_test" {
 
   instance_ids = []
 
-  enable_instance_alarms       = false
-  enable_target_group_alarms   = false
+  enable_instance_alarms         = false
+  enable_target_group_alarms     = false
   enable_scheduled_health_checks = false
-  enable_scheduled_backups     = false
+  enable_scheduled_backups       = false
 
-  enable_xray           = true
+  enable_xray            = true
   xray_sampling_priority = 100
-  xray_reservoir_size   = 1
-  xray_fixed_rate       = 0.05
+  xray_reservoir_size    = 1
+  xray_fixed_rate        = 0.05
 
   tags = {
-    Test  = "xray"
+    Test = "xray"
   }
 }
 
@@ -142,7 +142,7 @@ run "test_invalid_environment" {
   command = plan
 
   variables {
-    environment = "invalid"
+    environment           = "invalid"
     alert_email_addresses = ["test@example.com"]
   }
 
@@ -155,7 +155,7 @@ run "test_invalid_email" {
   command = plan
 
   variables {
-    environment = "dev"
+    environment           = "dev"
     alert_email_addresses = ["not-an-email"]
   }
 
@@ -168,7 +168,7 @@ run "test_invalid_cpu_threshold" {
   command = plan
 
   variables {
-    environment = "dev"
+    environment           = "dev"
     alert_email_addresses = ["test@example.com"]
     cpu_threshold_percent = 150
   }
@@ -182,9 +182,9 @@ run "test_invalid_log_retention" {
   command = plan
 
   variables {
-    environment = "dev"
+    environment           = "dev"
     alert_email_addresses = ["test@example.com"]
-    log_retention_days = 15  # Invalid value
+    log_retention_days    = 15 # Invalid value
   }
 
   expect_failures = [
@@ -205,10 +205,10 @@ run "test_valid_configuration" {
       "i-1234567890abcdef0",
       "i-0987654321fedcba0"
     ]
-    cpu_threshold_percent = 75
+    cpu_threshold_percent    = 75
     memory_threshold_percent = 80
-    log_retention_days = 90
-    enable_xray = true
+    log_retention_days       = 90
+    enable_xray              = true
   }
 
   assert {

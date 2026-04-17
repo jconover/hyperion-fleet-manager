@@ -51,7 +51,7 @@ module "windows_fleet" {
   ami_id = "" # Empty string uses latest AWS managed AMI
 
   # Storage configuration
-  root_volume_size = 50   # Default size in GB
+  root_volume_size = 50    # Default size in GB
   root_volume_type = "gp3" # Best price/performance
 
   # Network configuration

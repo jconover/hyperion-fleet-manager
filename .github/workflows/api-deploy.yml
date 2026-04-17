@@ -1,0 +1,419 @@
+name: API Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target deployment environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      image_tag:
+        description: 'Docker image tag to deploy (defaults to latest main build)'
+        required: false
+        type: string
+        default: 'latest'
+      skip_smoke_tests:
+        description: 'Skip post-deployment smoke tests'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+  deployments: write
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: hyperion-fleet-manager/api
+  ECS_CLUSTER_PREFIX: hyperion-fleet
+  ECS_SERVICE_NAME: hyperion-api
+
+concurrency:
+  group: api-deploy-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and Push Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.build-image.outputs.image_uri }}
+      task_definition_arn: ${{ steps.register-task.outputs.task_definition_arn }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        with:
+          role-to-assume: ${{ github.event.inputs.environment == 'dev' && secrets.AWS_ROLE_DEV || github.event.inputs.environment == 'staging' && secrets.AWS_ROLE_STAGING || secrets.AWS_ROLE_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-APIBuild
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine image tag
+        id: image-tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.image_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          if [ "${INPUT_TAG}" == "latest" ] || [ -z "${INPUT_TAG}" ]; then
+            IMAGE_TAG="${COMMIT_SHA:0:7}"
+          else
+            IMAGE_TAG="${INPUT_TAG}"
+          fi
+          echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          docker buildx build \
+            --push \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --tag "${IMAGE_URI}" \
+            --build-arg BUILD_SHA="${GITHUB_SHA}" \
+            api/
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+
+      - name: Download current task definition
+        id: current-task
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        run: |
+          TASK_DEF=$(aws ecs describe-services \
+            --cluster "${ECS_CLUSTER_PREFIX}-${TARGET_ENV}" \
+            --services "${ECS_SERVICE_NAME}" \
+            --query 'services[0].taskDefinition' \
+            --output text 2>/dev/null || echo "none")
+          echo "current_task_def=${TASK_DEF}" >> $GITHUB_OUTPUT
+
+      - name: Register new task definition
+        id: register-task
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+          CURRENT_TASK_DEF: ${{ steps.current-task.outputs.current_task_def }}
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        run: |
+          if [ "${CURRENT_TASK_DEF}" == "none" ]; then
+            echo "No existing task definition found. Using template."
+            echo "task_definition_arn=none" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get current task definition and update image
+          aws ecs describe-task-definition \
+            --task-definition "${CURRENT_TASK_DEF}" \
+            --query 'taskDefinition' > current-task-def.json
+
+          # Update container image in task definition
+          jq --arg IMAGE "${IMAGE_URI}" \
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            current-task-def.json > new-task-def.json
+
+          # Register new task definition
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task_definition_arn=${NEW_TASK_ARN}" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: ${{ github.event.inputs.environment }}
+      url: https://${{ github.event.inputs.environment }}.hyperion-fleet.example.com
+    outputs:
+      previous_task_def: ${{ steps.deploy-service.outputs.previous_task_def }}
+      deployment_id: ${{ steps.deploy-service.outputs.deployment_id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ github.event.inputs.environment == 'dev' && secrets.AWS_ROLE_DEV || github.event.inputs.environment == 'staging' && secrets.AWS_ROLE_STAGING || secrets.AWS_ROLE_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-APIDeploy
+
+      - name: Record previous task definition
+        id: previous
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        run: |
+          PREV_TASK=$(aws ecs describe-services \
+            --cluster "${ECS_CLUSTER_PREFIX}-${TARGET_ENV}" \
+            --services "${ECS_SERVICE_NAME}" \
+            --query 'services[0].taskDefinition' \
+            --output text 2>/dev/null || echo "none")
+          echo "previous_task_def=${PREV_TASK}" >> $GITHUB_OUTPUT
+
+      - name: Update ECS service
+        id: deploy-service
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+          NEW_TASK_ARN: ${{ needs.build.outputs.task_definition_arn }}
+          PREV_TASK: ${{ steps.previous.outputs.previous_task_def }}
+        run: |
+          echo "previous_task_def=${PREV_TASK}" >> $GITHUB_OUTPUT
+
+          if [ "${NEW_TASK_ARN}" == "none" ]; then
+            echo "No task definition available. Skipping deployment."
+            exit 1
+          fi
+
+          # Update ECS service with new task definition
+          DEPLOYMENT_ID=$(aws ecs update-service \
+            --cluster "${ECS_CLUSTER_PREFIX}-${TARGET_ENV}" \
+            --service "${ECS_SERVICE_NAME}" \
+            --task-definition "${NEW_TASK_ARN}" \
+            --force-new-deployment \
+            --query 'service.deployments[0].id' \
+            --output text)
+          echo "deployment_id=${DEPLOYMENT_ID}" >> $GITHUB_OUTPUT
+
+      - name: Wait for deployment stability
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        run: |
+          echo "Waiting for ECS service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${ECS_CLUSTER_PREFIX}-${TARGET_ENV}" \
+            --services "${ECS_SERVICE_NAME}" \
+            --timeout 600
+
+      - name: Generate deployment summary
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+          IMAGE_URI: ${{ needs.build.outputs.image_uri }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "### API Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${TARGET_ENV}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${IMAGE_URI}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${COMMIT_SHA}" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployed by:** ${ACTOR}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+
+  verify:
+    name: Post-Deployment Verification
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event.inputs.skip_smoke_tests != 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ github.event.inputs.environment == 'dev' && secrets.AWS_ROLE_DEV || github.event.inputs.environment == 'staging' && secrets.AWS_ROLE_STAGING || secrets.AWS_ROLE_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-APIVerify
+
+      - name: Resolve API endpoint
+        id: endpoint
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        run: |
+          # Look up ALB endpoint from ECS service or SSM parameter
+          API_URL=$(aws ssm get-parameter \
+            --name "/hyperion-fleet/${TARGET_ENV}/api-url" \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || echo "https://${TARGET_ENV}.hyperion-fleet.example.com")
+          echo "api_url=${API_URL}" >> $GITHUB_OUTPUT
+
+      - name: Health check with retry
+        env:
+          API_URL: ${{ steps.endpoint.outputs.api_url }}
+        run: |
+          echo "Running health check against ${API_URL}/health"
+          MAX_RETRIES=10
+          RETRY_INTERVAL=15
+
+          for i in $(seq 1 ${MAX_RETRIES}); do
+            HTTP_CODE=$(curl -sf -o /tmp/health-response.json -w "%{http_code}" "${API_URL}/health" 2>/dev/null || echo "000")
+            if [ "${HTTP_CODE}" == "200" ]; then
+              echo "Health check passed (attempt ${i})"
+              cat /tmp/health-response.json
+              exit 0
+            fi
+            echo "Attempt ${i}/${MAX_RETRIES} failed with HTTP ${HTTP_CODE}. Retrying in ${RETRY_INTERVAL}s..."
+            sleep ${RETRY_INTERVAL}
+          done
+
+          echo "Health check failed after ${MAX_RETRIES} attempts"
+          exit 1
+
+      - name: Run smoke tests
+        env:
+          API_URL: ${{ steps.endpoint.outputs.api_url }}
+        run: |
+          echo "Running API smoke tests..."
+
+          # Test basic endpoints
+          echo "Testing GET /health..."
+          curl -sf "${API_URL}/health" | jq .
+
+          echo "Testing GET /api/v1/status..."
+          curl -sf "${API_URL}/api/v1/status" | jq . || echo "Status endpoint not available"
+
+          echo "Testing GET /api/v1/fleet/instances..."
+          HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${API_URL}/api/v1/fleet/instances" 2>/dev/null || echo "000")
+          echo "Fleet instances endpoint returned HTTP ${HTTP_CODE}"
+
+          echo "Smoke tests completed"
+
+      - name: Verify CloudWatch metrics
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        run: |
+          echo "Checking CloudWatch metrics for anomalies..."
+
+          # Check ECS service metrics
+          aws cloudwatch get-metric-statistics \
+            --namespace "AWS/ECS" \
+            --metric-name "CPUUtilization" \
+            --dimensions Name=ClusterName,Value="${ECS_CLUSTER_PREFIX}-${TARGET_ENV}" Name=ServiceName,Value="${ECS_SERVICE_NAME}" \
+            --start-time "$(date -u -d '5 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')" \
+            --end-time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --period 60 \
+            --statistics Average \
+            --output json 2>/dev/null || echo "Metrics not yet available"
+
+          echo "CloudWatch verification completed"
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy, verify]
+    if: failure() && needs.deploy.outputs.previous_task_def != 'none'
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ github.event.inputs.environment == 'dev' && secrets.AWS_ROLE_DEV || github.event.inputs.environment == 'staging' && secrets.AWS_ROLE_STAGING || secrets.AWS_ROLE_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-APIRollback
+
+      - name: Rollback ECS service
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+          PREVIOUS_TASK_DEF: ${{ needs.deploy.outputs.previous_task_def }}
+        run: |
+          echo "Rolling back to previous task definition: ${PREVIOUS_TASK_DEF}"
+
+          aws ecs update-service \
+            --cluster "${ECS_CLUSTER_PREFIX}-${TARGET_ENV}" \
+            --service "${ECS_SERVICE_NAME}" \
+            --task-definition "${PREVIOUS_TASK_DEF}" \
+            --force-new-deployment
+
+          echo "Waiting for rollback to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${ECS_CLUSTER_PREFIX}-${TARGET_ENV}" \
+            --services "${ECS_SERVICE_NAME}" \
+            --timeout 600
+
+          echo "Rollback completed successfully"
+
+      - name: Generate rollback summary
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+          PREVIOUS_TASK_DEF: ${{ needs.deploy.outputs.previous_task_def }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "### API Rollback Executed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${TARGET_ENV}" >> $GITHUB_STEP_SUMMARY
+          echo "**Rolled back to:** ${PREVIOUS_TASK_DEF}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${ACTOR}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Deployment failed verification checks and was automatically rolled back." >> $GITHUB_STEP_SUMMARY
+
+  notify:
+    name: Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [build, deploy, verify, rollback]
+    if: always()
+    steps:
+      - name: Determine deployment status
+        id: status
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          ROLLBACK_RESULT: ${{ needs.rollback.result }}
+        run: |
+          if [ "${DEPLOY_RESULT}" == "success" ] && ([ "${VERIFY_RESULT}" == "success" ] || [ "${VERIFY_RESULT}" == "skipped" ]); then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=API deployment completed successfully" >> $GITHUB_OUTPUT
+          elif [ "${ROLLBACK_RESULT}" == "success" ]; then
+            echo "status=rolled_back" >> $GITHUB_OUTPUT
+            echo "message=API deployment failed and was rolled back" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "message=API deployment failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post deployment status
+        uses: actions/github-script@v7
+        env:
+          DEPLOY_STATUS: ${{ steps.status.outputs.status }}
+          DEPLOY_MSG: ${{ steps.status.outputs.message }}
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const status = process.env.DEPLOY_STATUS;
+            const message = process.env.DEPLOY_MSG;
+            const env = process.env.TARGET_ENV;
+            const sha = process.env.COMMIT_SHA;
+            const actor = process.env.ACTOR;
+            const runUrl = process.env.RUN_URL;
+
+            const statusIcon = status === 'success' ? 'pass' : status === 'rolled_back' ? 'warning' : 'fail';
+
+            const output = `## API Deployment Status: ${env}\n\n**Status:** ${statusIcon} ${message}\n**Environment:** ${env}\n**Commit:** ${sha.substring(0, 7)}\n**Deployed by:** ${actor}\n**Timestamp:** ${new Date().toISOString()}\n**Workflow:** ${runUrl}`;
+
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+              body: output
+            });
+
+      - name: Send notification
+        env:
+          DEPLOY_STATUS: ${{ steps.status.outputs.status }}
+          DEPLOY_MSG: ${{ steps.status.outputs.message }}
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+        run: |
+          echo "Deployment notification: ${DEPLOY_MSG} (${TARGET_ENV})"
+          # Integration point for Slack, PagerDuty, email, etc.
+          # Example: curl -X POST "${SLACK_WEBHOOK_URL}" -d "{\"text\":\"${DEPLOY_MSG}\"}"

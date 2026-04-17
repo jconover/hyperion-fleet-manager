@@ -91,15 +91,15 @@ module "security" {
 module "compute" {
   source = "../../modules/compute"
 
-  environment         = var.environment
-  vpc_id              = module.networking.vpc_id
-  private_subnet_ids  = module.networking.private_subnet_ids
-  public_subnet_ids   = module.networking.public_subnet_ids
+  environment        = var.environment
+  vpc_id             = module.networking.vpc_id
+  private_subnet_ids = module.networking.private_subnet_ids
+  public_subnet_ids  = module.networking.public_subnet_ids
 
   # EC2 configuration
-  instance_type       = var.instance_type
-  instance_count      = var.instance_count
-  key_name            = var.ssh_key_name
+  instance_type  = var.instance_type
+  instance_count = var.instance_count
+  key_name       = var.ssh_key_name
 
   # Auto Scaling - production requires multi-AZ
   enable_auto_scaling = var.enable_auto_scaling
@@ -108,7 +108,7 @@ module "compute" {
   desired_capacity    = var.asg_desired_capacity
 
   # Security
-  security_group_ids  = [module.security.app_security_group_id]
+  security_group_ids = [module.security.app_security_group_id]
 
   # Production-specific settings
   enable_termination_protection = true
@@ -133,17 +133,17 @@ module "observability" {
   enable_detailed_monitoring = var.enable_detailed_monitoring
 
   # Alarms - comprehensive monitoring for production
-  enable_cpu_alarm    = var.enable_cpu_alarm
-  cpu_threshold       = var.cpu_alarm_threshold
-  alarm_email         = var.alarm_notification_email
+  enable_cpu_alarm = var.enable_cpu_alarm
+  cpu_threshold    = var.cpu_alarm_threshold
+  alarm_email      = var.alarm_notification_email
 
   # Resources to monitor
   instance_ids = module.compute.instance_ids
 
   # Production-specific monitoring
-  enable_memory_alarm    = true
-  enable_disk_alarm      = true
-  enable_network_alarm   = true
+  enable_memory_alarm  = true
+  enable_disk_alarm    = true
+  enable_network_alarm = true
 
   tags = merge(
     local.common_tags,

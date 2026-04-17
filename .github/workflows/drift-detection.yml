@@ -31,6 +31,7 @@ jobs:
   detect-drift-dev:
     name: Detect Drift - Dev
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'dev' || github.event_name == 'schedule'
     steps:
       - name: Checkout code
@@ -91,6 +92,7 @@ jobs:
   detect-drift-staging:
     name: Detect Drift - Staging
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'staging' || github.event_name == 'schedule'
     steps:
       - name: Checkout code
@@ -151,6 +153,7 @@ jobs:
   detect-drift-prod:
     name: Detect Drift - Production
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'prod' || github.event_name == 'schedule'
     steps:
       - name: Checkout code

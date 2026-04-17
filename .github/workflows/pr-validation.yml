@@ -307,7 +307,13 @@ jobs:
     needs: [terraform-fmt, terraform-validate]
     strategy:
       matrix:
-        environment: [dev, staging, prod]
+        include:
+          - environment: dev
+            aws_role_secret: AWS_ROLE_DEV
+          - environment: staging
+            aws_role_secret: AWS_ROLE_STAGING
+          - environment: prod
+            aws_role_secret: AWS_ROLE_PROD
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -315,7 +321,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets[format('AWS_ROLE_{0}', matrix.environment)] }}
+          role-to-assume: ${{ secrets[matrix.aws_role_secret] }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-TerraformPlan-${{ matrix.environment }}
 
