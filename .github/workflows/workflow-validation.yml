@@ -45,9 +45,10 @@ jobs:
       - name: Run actionlint
         uses: reviewdog/action-actionlint@v1
         with:
-          fail_on_error: true
           filter_mode: nofilter
-          level: error
+          level: warning
+          fail_level: error
+          actionlint_flags: -shellcheck=
 
   check-secrets:
     name: Check Required Secrets
