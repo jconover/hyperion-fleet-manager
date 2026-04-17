@@ -35,7 +35,7 @@ jobs:
     if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'dev' || github.event_name == 'schedule'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -96,7 +96,7 @@ jobs:
     if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'staging' || github.event_name == 'schedule'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -157,7 +157,7 @@ jobs:
     if: github.event.inputs.environment == 'all' || github.event.inputs.environment == 'prod' || github.event_name == 'schedule'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
