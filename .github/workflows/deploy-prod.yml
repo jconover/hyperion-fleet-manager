@@ -368,7 +368,7 @@ jobs:
   notify:
     name: Send Notifications
     runs-on: ubuntu-latest
-    needs: [update-deployment-status]
+    needs: [deploy, update-deployment-status]
     if: always()
     steps:
       - name: Send notification

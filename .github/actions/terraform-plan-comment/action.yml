@@ -30,9 +30,7 @@ runs:
 
         if [ ${PLAN_LENGTH} -gt 65000 ]; then
           echo "Plan output is too large (${PLAN_LENGTH} characters), truncating..."
-          PLAN_CONTENT="${PLAN_CONTENT:0:65000}
-
-... (output truncated - full plan available in artifacts)"
+          PLAN_CONTENT="${PLAN_CONTENT:0:65000}"$'\n\n(output truncated - full plan available in artifacts)'
         fi
 
         # Save to output file for the next step
