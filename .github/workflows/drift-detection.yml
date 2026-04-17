@@ -45,7 +45,7 @@ jobs:
           role-session-name: GitHubActions-DriftDev
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
@@ -106,7 +106,7 @@ jobs:
           role-session-name: GitHubActions-DriftStaging
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
@@ -167,7 +167,7 @@ jobs:
           role-session-name: GitHubActions-DriftProd
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
